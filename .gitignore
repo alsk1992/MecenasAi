@@ -29,55 +29,17 @@ pids/
 # Coverage
 coverage/
 
-# Frontend apps - LOCAL ONLY, never push but NEVER DELETE
-# Deploy via: cd apps/docs && vercel --prod --yes
-apps/
-.nyc_output/
-
 # TypeScript cache
 *.tsbuildinfo
 
-# Local config
-.vercel/
+# Database
+*.db
+*.sqlite
 
-# =============================================================================
-# Development/Internal - Not for production repo
-# =============================================================================
-
-# Frontend website (separate repo: cloddsbot-docs)
+# Local dev
 apps/
-
-# Placeholder folders
-ui/
-vendor/
-
-# Development workspace
-workspace/
-
-# Large binary files (use GitHub releases)
-*.gif
-*.mp4
-demo.tape
-assets/frames/
-
-# Internal planning docs
-PLAN.md
-TODO.md
-IMPLEMENTATION_AUDIT.md
-CLAWDBOT_ARCHITECTURE.md
-
-# MCP config (user-specific)
-.mcp.json
+.vercel/
 
 # Temp files
 *.bak
 *~
-
-# =============================================================================
-# PRIVATE SERVER INFRASTRUCTURE - Never push to public GitHub
-# Deploy to hostkey only via rsync
-# =============================================================================
-
-# Standalone compute API server (monetization layer — hosted only)
-src/api/
-.vercel

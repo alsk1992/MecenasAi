@@ -317,22 +317,22 @@ class App {
     const subEl = document.querySelector('.welcome-sub');
     if (greetingEl) {
       const hour = new Date().getHours();
-      const greeting = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
+      const greeting = hour < 12 ? 'Dzień dobry' : hour < 18 ? 'Dzień dobry' : 'Dobry wieczór';
       greetingEl.textContent = greeting;
 
       if (subEl) {
         const subs = hour < 12 ? [
-          'What odds are you exploring today?',
-          'Markets are waking up. Ready to trade?',
-          'Time to find your edge.',
+          'W czym mogę dziś pomóc?',
+          'Gotowy do pracy nad sprawami.',
+          'Sprawdźmy terminy i pisma.',
         ] : hour < 18 ? [
-          'What odds are you exploring?',
-          'Time to predict the future.',
-          'The markets are moving. Are you?',
+          'W czym mogę pomóc?',
+          'Pracujemy nad sprawami.',
+          'Szukasz przepisu? Zapytaj.',
         ] : [
-          'Time to predict the future.',
-          'What odds do you want to explore?',
-          'Markets never sleep. Neither does Clodds.',
+          'Mecenas czuwa nad Twoimi sprawami.',
+          'Potrzebujesz pomocy prawnej?',
+          'Przygotujmy dokumenty.',
         ];
         subEl.textContent = subs[Math.floor(Math.random() * subs.length)];
       }
@@ -392,7 +392,7 @@ class App {
         }
         if (document.hidden) {
           this._unreadCount++;
-          document.title = `(${this._unreadCount}) New message - Clodds`;
+          document.title = `(${this._unreadCount}) Nowa wiadomość - Mecenas`;
         }
       } else if (msg.type === 'edit') {
         this.chat.editMessage(msg.messageId, msg.text);
@@ -444,7 +444,7 @@ class App {
     const session = this.sidebar.sessions.find(s => s.id === sessionId);
     const headerTitle = document.getElementById('header-title');
     if (headerTitle) {
-      headerTitle.textContent = session?.title || 'Clodds';
+      headerTitle.textContent = session?.title || 'Mecenas';
     }
 
     // Load messages from API (guard against race if user switched again)
@@ -545,7 +545,7 @@ class App {
         this._setWelcomeMode(true);
         Storage.remove('lastSessionId');
         const headerTitle = document.getElementById('header-title');
-        if (headerTitle) headerTitle.textContent = 'Clodds';
+        if (headerTitle) headerTitle.textContent = 'Mecenas';
       }
     }
   }
