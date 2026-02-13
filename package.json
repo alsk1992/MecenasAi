@@ -1,0 +1,52 @@
+{
+  "name": "mecenas",
+  "version": "0.1.0",
+  "description": "Mecenas — Polski asystent prawny AI. Bielik LLM + RAG po polskich kodeksach. Pisma procesowe, zarządzanie sprawami, wyszukiwanie przepisów.",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build",
+    "ingest": "tsx src/legal/ingest-cli.ts"
+  },
+  "keywords": [
+    "legal",
+    "prawo",
+    "prawnik",
+    "ai",
+    "bielik",
+    "ollama",
+    "polish",
+    "legal-tech",
+    "kodeks-cywilny",
+    "rag",
+    "document-generation",
+    "mecenas"
+  ],
+  "author": "alsk1992",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.73.0",
+    "docx": "^9.5.2",
+    "dotenv": "^16.6.1",
+    "grammy": "^1.21.1",
+    "pino": "^8.18.0",
+    "pino-pretty": "^10.3.1",
+    "sql.js": "^1.10.3",
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.19.32",
+    "@types/sql.js": "^1.4.9",
+    "@types/ws": "^8.5.10",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3"
+  }
+}

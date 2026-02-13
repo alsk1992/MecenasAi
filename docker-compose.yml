@@ -1,0 +1,27 @@
+services:
+  mecenas:
+    build: .
+    ports:
+      - "18789:18789"
+    environment:
+      OLLAMA_URL: http://ollama:11434
+      MECENAS_MODEL: "SpeakLeash/bielik-11b-v2.2-instruct:Q4_K_M"
+      MECENAS_BIND: all
+    volumes:
+      - mecenas-data:/root/.mecenas
+    depends_on:
+      ollama:
+        condition: service_started
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    restart: unless-stopped
+
+volumes:
+  mecenas-data:
+  ollama-models:
