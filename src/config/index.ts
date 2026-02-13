@@ -49,18 +49,25 @@ export function loadConfig(): Config {
   const hasAnthropic = !!process.env.ANTHROPIC_API_KEY;
   const defaultProvider = hasOllama ? 'ollama' : (hasAnthropic ? 'anthropic' : 'ollama');
 
+  // Parse and clamp values
+  const port = safeParseInt(process.env.PORT ?? process.env.MECENAS_PORT, fileConfig.gateway?.port ?? 18789);
+  const temperature = fileConfig.agent?.temperature ?? 0.3;
+  const maxMessages = fileConfig.session?.maxMessages ?? 50;
+
   const config: Config = {
     agent: {
       model: fileConfig.agent?.model ?? defaultModel,
       provider: (fileConfig.agent?.provider ?? defaultProvider) as 'ollama' | 'anthropic',
-      maxTokens: fileConfig.agent?.maxTokens ?? 4096,
-      temperature: fileConfig.agent?.temperature ?? 0.3,
+      maxTokens: Math.max(256, Math.min(fileConfig.agent?.maxTokens ?? 4096, 65536)),
+      temperature: Math.max(0, Math.min(Number(temperature) || 0.3, 2)),
       ollamaUrl: process.env.OLLAMA_URL ?? fileConfig.agent?.ollamaUrl ?? 'http://localhost:11434',
       anthropicKey: process.env.ANTHROPIC_API_KEY ?? fileConfig.agent?.anthropicKey,
     },
     gateway: {
-      port: safeParseInt(process.env.PORT ?? process.env.MECENAS_PORT, fileConfig.gateway?.port ?? 18789),
-      bind: (process.env.MECENAS_BIND as 'loopback' | 'all') ?? fileConfig.gateway?.bind ?? 'loopback',
+      port: Math.max(1, Math.min(port, 65535)),
+      bind: (['loopback', 'all'].includes(process.env.MECENAS_BIND ?? '')
+        ? process.env.MECENAS_BIND as 'loopback' | 'all'
+        : fileConfig.gateway?.bind ?? 'loopback') as 'loopback' | 'all',
       cors: fileConfig.gateway?.cors,
       auth: fileConfig.gateway?.auth ?? 'off',
       token: process.env.MECENAS_TOKEN ?? fileConfig.gateway?.token,
@@ -77,11 +84,11 @@ export function loadConfig(): Config {
       },
     },
     session: {
-      maxMessages: fileConfig.session?.maxMessages ?? 50,
+      maxMessages: Math.max(1, Math.min(Number(maxMessages) || 50, 1000)),
       ttlMs: fileConfig.session?.ttlMs ?? 24 * 60 * 60 * 1000,
     },
     http: {
-      rateLimitPerMin: fileConfig.http?.rateLimitPerMin ?? 60,
+      rateLimitPerMin: Math.max(1, Math.min(fileConfig.http?.rateLimitPerMin ?? 60, 10000)),
       retryCount: fileConfig.http?.retryCount ?? 3,
       retryDelayMs: fileConfig.http?.retryDelayMs ?? 1000,
     },

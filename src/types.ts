@@ -220,6 +220,23 @@ export interface LegalArticle {
 }
 
 // =============================================================================
+// DOCUMENT TEMPLATES
+// =============================================================================
+
+export interface DocumentTemplate {
+  id: string;
+  name: string;
+  type: DocumentType;
+  content: string;
+  description?: string;
+  lawArea?: LawArea;
+  tags?: string;           // comma-separated for search
+  useCount: number;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+// =============================================================================
 // BILLING
 // =============================================================================
 

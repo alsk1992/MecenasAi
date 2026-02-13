@@ -20,7 +20,7 @@ export class Chat {
           this._copyText(code.textContent).then(() => {
             if (!codeCopy._origHtml) codeCopy._origHtml = codeCopy.innerHTML;
             clearTimeout(codeCopy._copyTimer);
-            codeCopy.innerHTML = this._checkSvg + ' Copied!';
+            codeCopy.innerHTML = this._checkSvg + ' Skopiowano!';
             codeCopy.classList.add('copied');
             codeCopy._copyTimer = setTimeout(() => { codeCopy.innerHTML = codeCopy._origHtml; codeCopy.classList.remove('copied'); codeCopy._origHtml = null; }, 2000);
           });
@@ -37,7 +37,7 @@ export class Chat {
           this._copyText(bubble.innerText).then(() => {
             if (!msgCopy._origHtml) msgCopy._origHtml = msgCopy.innerHTML;
             clearTimeout(msgCopy._copyTimer);
-            msgCopy.innerHTML = this._checkSvg + '<span>Copied!</span>';
+            msgCopy.innerHTML = this._checkSvg + '<span>Skopiowano!</span>';
             msgCopy.classList.add('copied');
             msgCopy._copyTimer = setTimeout(() => { msgCopy.innerHTML = msgCopy._origHtml; msgCopy.classList.remove('copied'); msgCopy._origHtml = null; }, 2000);
           });
@@ -128,7 +128,7 @@ export class Chat {
       actions.className = 'msg-actions';
       const editBtn = document.createElement('button');
       editBtn.className = 'msg-edit';
-      editBtn.title = 'Edit';
+      editBtn.title = 'Edytuj';
       editBtn.innerHTML = this._editSvg;
       actions.appendChild(editBtn);
       content.appendChild(actions);
@@ -169,6 +169,7 @@ export class Chat {
     bubble.className = 'msg-bubble bot-bubble';
     bubble.innerHTML = this.renderMarkdown(text || '');
     this._appendAttachments(bubble, attachments);
+    this._appendDocumentDownloads(bubble, text || '');
     content.appendChild(bubble);
     content.appendChild(this._createActions());
     content.appendChild(this._createTimestamp());
@@ -184,8 +185,8 @@ export class Chat {
     actions.className = 'msg-actions';
     const copyBtn = document.createElement('button');
     copyBtn.className = 'msg-copy';
-    copyBtn.title = 'Copy';
-    copyBtn.innerHTML = this._copySvg + '<span>Copy</span>';
+    copyBtn.title = 'Kopiuj';
+    copyBtn.innerHTML = this._copySvg + '<span>Kopiuj</span>';
     actions.appendChild(copyBtn);
 
     return actions;
@@ -196,9 +197,9 @@ export class Chat {
     avatar.className = 'msg-avatar bot-avatar';
     const img = document.createElement('img');
     img.src = 'logo.png';
-    img.alt = 'C';
+    img.alt = 'M';
     img.className = 'avatar-img';
-    img.onerror = () => { img.remove(); avatar.textContent = 'C'; };
+    img.onerror = () => { img.remove(); avatar.textContent = 'M'; };
     avatar.appendChild(img);
     return avatar;
   }
@@ -237,7 +238,7 @@ export class Chat {
   showLoading() {
     const el = document.createElement('div');
     el.className = 'msg-system msg-loading';
-    el.innerHTML = '<span class="pill">Loading messages...</span>';
+    el.innerHTML = '<span class="pill">Ładowanie wiadomości...</span>';
     this.messagesEl.appendChild(el);
   }
 
@@ -248,12 +249,13 @@ export class Chat {
 
   _appendAttachments(bubble, attachments) {
     if (!Array.isArray(attachments) || !attachments.length) return;
+    const SAFE_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
     for (const att of attachments) {
       const url = att.url || (att.data && att.mimeType
         ? 'data:' + att.mimeType + ';base64,' + att.data
         : null);
       if (url && !/^(https?:|data:)/i.test(url)) continue;
-      if (att.type === 'image' && url) {
+      if (att.type === 'image' && url && SAFE_IMAGE_TYPES.includes(att.mimeType)) {
         const img = document.createElement('img');
         img.src = url;
         img.style.cssText = 'max-width:100%;display:block;margin-top:8px;border-radius:10px;';
@@ -273,6 +275,27 @@ export class Chat {
         link.rel = 'noopener';
         bubble.appendChild(link);
       }
+    }
+  }
+
+  _appendDocumentDownloads(bubble, text) {
+    if (!text) return;
+    // Detect document IDs (32-char hex from secureId) near document context
+    const docIdRegex = /(?:dokument|pismo|document|ID)[^a-z]{0,20}([a-f0-9]{24,})/gi;
+    const ids = new Set();
+    let m;
+    while ((m = docIdRegex.exec(text)) !== null) {
+      ids.add(m[1]);
+    }
+    if (!ids.size) return;
+    for (const id of ids) {
+      const btn = document.createElement('a');
+      btn.className = 'doc-download-btn';
+      btn.href = `/api/documents/${encodeURIComponent(id)}/export`;
+      btn.target = '_blank';
+      btn.rel = 'noopener';
+      btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Pobierz DOCX';
+      bubble.appendChild(btn);
     }
   }
 
@@ -426,7 +449,7 @@ export class Chat {
       if (!block) return '';
       const langAttr = block.lang ? ` class="lang-${block.lang}"` : '';
       const langLabel = block.lang ? `<span class="code-lang">${this._escapeHtml(block.lang)}</span>` : '';
-      const copyBtn = `<button class="code-copy">${this._copySvg} Copy</button>`;
+      const copyBtn = `<button class="code-copy">${this._copySvg} Kopiuj</button>`;
       return `<div class="code-block"><div class="code-header">${langLabel}${copyBtn}</div><pre><code${langAttr}>${this._escapeHtml(block.code)}</code></pre></div>`;
     });
 

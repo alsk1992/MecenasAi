@@ -73,12 +73,31 @@ class App {
         body: JSON.stringify({ title, userId: this.userId }),
       }).catch(() => {});
     };
-    // Artifact/code click — switch to session and scroll to message
-    this.sidebar.onArtifactClick = (sessionId, messageIndex) => {
-      this._navigateToMessage(sessionId, messageIndex);
+    // Case/document/deadline click — send prompt to chat
+    this.sidebar.onCaseClick = (c) => {
+      const inputEl = document.getElementById('input');
+      inputEl.value = `Pokaż szczegóły sprawy: ${c.title}`;
+      this._send();
     };
-    this.sidebar.onCodeClick = (sessionId, messageIndex) => {
-      this._navigateToMessage(sessionId, messageIndex);
+    this.sidebar.onDocumentClick = (d) => {
+      const inputEl = document.getElementById('input');
+      inputEl.value = `Pokaż dokument: ${d.title}`;
+      this._send();
+    };
+    this.sidebar.onDeadlineClick = (d) => {
+      const inputEl = document.getElementById('input');
+      inputEl.value = `Pokaż termin: ${d.title}`;
+      this._send();
+    };
+    this.sidebar.onNewCase = () => {
+      const inputEl = document.getElementById('input');
+      inputEl.value = 'Utwórz nową sprawę';
+      inputEl.focus();
+    };
+    this.sidebar.onNewDeadline = () => {
+      const inputEl = document.getElementById('input');
+      inputEl.value = 'Dodaj nowy termin';
+      inputEl.focus();
     };
 
     // Language change — update speech recognition (set later once recognition is created)
@@ -137,6 +156,10 @@ class App {
 
     sendBtnEl.addEventListener('click', () => {
       if (this._generating) {
+        // Send cancel to server to abort agent processing
+        if (this.ws?.connected) {
+          this.ws.ws.send(JSON.stringify({ type: 'cancel' }));
+        }
         this.chat.hideTyping();
         this._setGenerating(false);
         return;
@@ -181,6 +204,12 @@ class App {
     fileInput?.addEventListener('change', () => {
       const file = fileInput.files?.[0];
       if (!file) return;
+      const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
+      if (file.size > MAX_FILE_SIZE) {
+        this.chat.addMessage('Plik za duży (maks. 10 MB).', 'system');
+        fileInput.value = '';
+        return;
+      }
       const reader = new FileReader();
       reader.onload = () => {
         this._pendingAttachment = {
@@ -191,7 +220,7 @@ class App {
         showFilePreview(file.name, file.type);
       };
       reader.onerror = () => {
-        this.chat.addMessage('Failed to read file.', 'system');
+        this.chat.addMessage('Nie udało się odczytać pliku.', 'system');
       };
       reader.readAsDataURL(file);
       fileInput.value = '';
@@ -235,7 +264,7 @@ class App {
       const recognition = this._recognition = new SpeechRecognition();
       recognition.continuous = false;
       recognition.interimResults = true;
-      recognition.lang = Storage.get('webchat_language') || 'en-US';
+      recognition.lang = Storage.get('webchat_language') || 'pl-PL';
       let listening = false;
       let textBeforeVoice = '';
 
@@ -386,9 +415,11 @@ class App {
       } else if (msg.type === 'message') {
         this._setWelcomeMode(false);
         this.chat.addBotMessage(msg.text, msg.messageId, msg.attachments);
-        // Feed new bot message to sidebar for live artifact extraction
+        // Refresh sidebar data tabs after bot responds (new docs/cases may have been created)
         if (this.activeSessionId && msg.text) {
-          this.sidebar.feedMessages(this.activeSessionId, [{ role: 'assistant', content: msg.text }]);
+          this.sidebar._fetchCases();
+          this.sidebar._fetchDocuments();
+          this.sidebar._fetchDeadlines();
         }
         if (document.hidden) {
           this._unreadCount++;
@@ -398,6 +429,14 @@ class App {
         this.chat.editMessage(msg.messageId, msg.text);
       } else if (msg.type === 'delete') {
         this.chat.deleteMessage(msg.messageId);
+      } else if (msg.type === 'reminder') {
+        // Deadline reminder notification
+        this.chat.addMessage(msg.text, 'system');
+        this.sidebar._fetchDeadlines();
+        if (document.hidden) {
+          this._unreadCount++;
+          document.title = `(${this._unreadCount}) Przypomnienie - Mecenas`;
+        }
       } else if (msg.type === 'error') {
         if (msg.message === 'Invalid token') {
           const retry = prompt('Authentication required. Enter WebChat token:');
@@ -436,6 +475,7 @@ class App {
     if (this.activeSessionId === sessionId && this.ws.connected) return;
 
     this.chat.hideTyping();
+    this._clearFilePreview();
     this.activeSessionId = sessionId;
     this.sidebar.setActive(sessionId);
     Storage.set('lastSessionId', sessionId);
@@ -456,8 +496,6 @@ class App {
         const msgs = data.messages || [];
         this.chat.loadHistory(msgs);
         this._setWelcomeMode(!msgs.length);
-        // Feed to sidebar for artifact/code extraction
-        this.sidebar.feedMessages(sessionId, msgs);
       } else {
         this.chat.clear();
         this.chat.showWelcome();
@@ -498,7 +536,6 @@ class App {
         if (this.activeSessionId !== sessionId || this._refreshSeq !== seq) return;
         const msgs = data.messages || [];
         this.chat.loadHistory(msgs);
-        this.sidebar.feedMessages(sessionId, msgs);
       }
     } catch { /* ignore */ }
   }
@@ -518,17 +555,17 @@ class App {
   }
 
   async deleteSession(sessionId) {
-    if (!confirm('Delete this conversation?')) return;
+    if (!confirm('Usunąć tę rozmowę?')) return;
     try {
       const r = await fetch(`/api/chat/sessions/${sessionId}?userId=${encodeURIComponent(this.userId)}`, {
         method: 'DELETE',
       });
       if (!r.ok) {
-        this.chat.addMessage('Failed to delete conversation. Please try again.', 'system');
+        this.chat.addMessage('Nie udało się usunąć rozmowy. Spróbuj ponownie.', 'system');
         return;
       }
     } catch {
-      this.chat.addMessage('Failed to delete conversation. Please try again.', 'system');
+      this.chat.addMessage('Nie udało się usunąć rozmowy. Spróbuj ponownie.', 'system');
       return;
     }
 
@@ -586,12 +623,12 @@ class App {
             setTimeout(check, 50);
           });
         } else {
-          this.chat.addMessage('Failed to create session. Please try again.', 'system');
+          this.chat.addMessage('Nie udało się utworzyć sesji. Spróbuj ponownie.', 'system');
           this._sending = false;
           return;
         }
       } catch {
-        this.chat.addMessage('Failed to create session. Please try again.', 'system');
+        this.chat.addMessage('Nie udało się utworzyć sesji. Spróbuj ponownie.', 'system');
         this._sending = false;
         return;
       }
@@ -599,7 +636,7 @@ class App {
 
     // Check if WS is actually ready before sending
     if (!this.ws.connected) {
-      this.chat.addMessage('Connection lost. Please wait and try again.', 'system');
+      this.chat.addMessage('Utracono połączenie. Poczekaj i spróbuj ponownie.', 'system');
       this._sending = false;
       return;
     }
@@ -652,79 +689,52 @@ class App {
     this._setWelcomeMode(true);
   }
 
-  async _navigateToMessage(sessionId, messageIndex) {
-    // Switch to chats tab
-    this.sidebar.switchTab('chats');
-    // Switch to session if needed
-    if (this.activeSessionId !== sessionId) {
-      await this.switchSession(sessionId);
-    }
-    // Scroll to the message by index
-    const messagesEl = document.getElementById('messages');
-    if (!messagesEl) return;
-    // Messages are direct children of #messages (skipping welcome div)
-    const msgEls = Array.from(messagesEl.children).filter(el => el.classList.contains('msg-row') || el.classList.contains('msg-system'));
-    if (messageIndex >= 0 && messageIndex < msgEls.length) {
-      const target = msgEls[messageIndex];
-      target.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      // Brief highlight
-      target.style.outline = '2px solid var(--accent)';
-      target.style.outlineOffset = '2px';
-      target.style.borderRadius = '8px';
-      setTimeout(() => {
-        target.style.outline = '';
-        target.style.outlineOffset = '';
-        target.style.borderRadius = '';
-      }, 2000);
-    }
-  }
-
   async _loadMarketPulse(el) {
     try {
-      const r = await fetch('/api/feeds/search?q=&limit=50');
+      const r = await fetch('/api/knowledge/stats');
       if (!r.ok) return;
       const data = await r.json();
-      const markets = data?.data?.markets || [];
-      if (!markets.length) return;
-
-      // Count platforms
-      const platforms = new Set(markets.map(m => m.platform));
-
-      // Find biggest movers (markets with prices near extremes)
-      const movers = markets
-        .filter(m => m.outcomes?.length >= 2)
-        .map(m => {
-          const price = m.outcomes[0]?.price ?? 0.5;
-          return { q: m.question, price, dist: Math.abs(price - 0.5) };
-        })
-        .sort((a, b) => b.dist - a.dist);
-
-      const hot = movers[0];
+      if (!data.total) return;
 
       el.innerHTML = '';
 
-      // Live dot + market count
-      const countItem = document.createElement('span');
-      countItem.className = 'welcome-pulse-item';
-      countItem.innerHTML = '<span class="welcome-pulse-dot live"></span>'
-        + '<span class="welcome-pulse-value">' + markets.length + '</span> markets tracked';
-      el.appendChild(countItem);
+      // Total articles
+      const totalItem = document.createElement('span');
+      totalItem.className = 'welcome-pulse-item';
+      const dot = document.createElement('span');
+      dot.className = 'welcome-pulse-dot live';
+      totalItem.appendChild(dot);
+      const totalVal = document.createElement('span');
+      totalVal.className = 'welcome-pulse-value';
+      totalVal.textContent = String(Number(data.total) || 0).replace(/\B(?=(\d{3})+(?!\d))/g, '\u00A0');
+      totalItem.appendChild(totalVal);
+      totalItem.appendChild(document.createTextNode(' artykułów w bazie'));
+      el.appendChild(totalItem);
 
-      // Platform count
-      const platItem = document.createElement('span');
-      platItem.className = 'welcome-pulse-item';
-      platItem.innerHTML = '<span class="welcome-pulse-value">' + platforms.size + '</span> platforms';
-      el.appendChild(platItem);
+      // Number of codes
+      const codesItem = document.createElement('span');
+      codesItem.className = 'welcome-pulse-item';
+      const codesCount = data.byCodes?.filter(c => c.count > 0).length || 0;
+      const codesVal = document.createElement('span');
+      codesVal.className = 'welcome-pulse-value';
+      codesVal.textContent = String(codesCount);
+      codesItem.appendChild(codesVal);
+      codesItem.appendChild(document.createTextNode(' kodeksów'));
+      el.appendChild(codesItem);
 
-      // Hot market
-      if (hot) {
-        const pct = Math.round(hot.price * 100);
-        const hotItem = document.createElement('span');
-        hotItem.className = 'welcome-pulse-item';
-        const q = hot.q.length > 30 ? hot.q.slice(0, 30) + '...' : hot.q;
-        hotItem.innerHTML = '<span class="welcome-pulse-value ' + (pct > 50 ? 'up' : 'down') + '">'
-          + pct + '%</span> ' + q;
-        el.appendChild(hotItem);
+      // Biggest code
+      if (data.byCodes?.length) {
+        const biggest = [...data.byCodes].sort((a, b) => b.count - a.count)[0];
+        if (biggest) {
+          const bigItem = document.createElement('span');
+          bigItem.className = 'welcome-pulse-item';
+          const bigVal = document.createElement('span');
+          bigVal.className = 'welcome-pulse-value';
+          bigVal.textContent = String(biggest.code || '');
+          bigItem.appendChild(bigVal);
+          bigItem.appendChild(document.createTextNode(' ' + String(Number(biggest.count) || 0).replace(/\B(?=(\d{3})+(?!\d))/g, '\u00A0') + ' art.'));
+          el.appendChild(bigItem);
+        }
       }
     } catch { /* silent — pulse is optional */ }
   }
@@ -737,7 +747,7 @@ class App {
     if (on) {
       btn.classList.add('stop-mode');
       btn.innerHTML = this._stopSvg;
-      btn.title = 'Stop generating';
+      btn.title = 'Anuluj generowanie';
       btn.classList.add('active');
       // Auto-reset after 90s to prevent stuck state
       this._genTimeout = setTimeout(() => {

@@ -111,11 +111,12 @@ function validateStartupRequirements(): void {
   // Mecenas works with Ollama (Bielik) by default — no API key required
   // Anthropic key is optional cloud fallback
   if (!process.env.OLLAMA_URL && !process.env.ANTHROPIC_API_KEY) {
-    warnings.push(
-      'Brak OLLAMA_URL i ANTHROPIC_API_KEY. Mecenas wymaga Ollama z Bielikiem lub klucza Anthropic.\n' +
+    const msg = 'Brak OLLAMA_URL i ANTHROPIC_API_KEY. Mecenas wymaga co najmniej jednego dostawcy LLM.\n' +
       '  Ollama: OLLAMA_URL=http://localhost:11434\n' +
-      '  Bielik: ollama pull SpeakLeash/bielik-11b-v2.2-instruct:Q4_K_M'
-    );
+      '  Bielik: ollama pull SpeakLeash/bielik-11b-v2.2-instruct:Q4_K_M\n' +
+      '  Anthropic: ANTHROPIC_API_KEY=sk-ant-...';
+    logger.error(msg);
+    throw new Error(msg);
   }
 
   if (!process.env.TELEGRAM_BOT_TOKEN) {

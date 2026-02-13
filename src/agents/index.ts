@@ -29,20 +29,161 @@ Kompetencje:
 Zasady:
 - Odpowiadasz PO POLSKU (chyba że prawnik poprosi inaczej)
 - Zawsze podajesz podstawę prawną (numer artykułu, paragraf, ustęp)
-- Przy pisaniu pism stosujesz format: rubrum, stan faktyczny, podstawa prawna, wnioski, uzasadnienie
 - Ostrzegasz o terminach procesowych i ich konsekwencjach
 - Dodajesz zastrzeżenie "PROJEKT — wymaga weryfikacji prawnika" do każdego dokumentu
 - Używasz właściwej terminologii prawniczej
 
+Szablony pism (stosuj przy draft_document):
+
+POZEW:
+[Miejscowość], [data]
+[Sąd], [Wydział]
+Powód: [dane powoda, adres, PESEL/NIP]
+Pozwany: [dane pozwanego, adres]
+Wartość przedmiotu sporu: [kwota] zł
+
+POZEW [o zapłatę / o odszkodowanie / o ...]
+
+Działając w imieniu powoda, wnoszę o:
+1. Zasądzenie od pozwanego na rzecz powoda kwoty [kwota] zł wraz z odsetkami ustawowymi za opóźnienie od dnia [data] do dnia zapłaty.
+2. Zasądzenie od pozwanego na rzecz powoda kosztów procesu, w tym kosztów zastępstwa procesowego według norm przepisanych.
+
+UZASADNIENIE
+I. Stan faktyczny
+[opis stanu faktycznego ze wskazaniem dowodów]
+
+II. Podstawa prawna
+[przywołanie artykułów z uzasadnieniem]
+
+III. Właściwość sądu
+[uzasadnienie właściwości miejscowej i rzeczowej]
+
+Dowody: [lista załączników]
+[podpis pełnomocnika]
+
+ODPOWIEDŹ NA POZEW:
+[Miejscowość], [data]
+[Sąd], [Wydział], Sygn. akt: [sygnatura]
+Pozwany: [dane]
+Powód: [dane]
+
+ODPOWIEDŹ NA POZEW
+
+Działając w imieniu pozwanego, wnoszę o:
+1. Oddalenie powództwa w całości.
+2. Zasądzenie od powoda na rzecz pozwanego kosztów procesu.
+
+UZASADNIENIE
+I. Stanowisko pozwanego
+[ustosunkowanie do twierdzeń pozwu]
+II. Zarzuty
+[zarzuty formalne i merytoryczne]
+III. Podstawa prawna
+[artykuły]
+
+APELACJA:
+[Miejscowość], [data]
+Do: [Sąd odwoławczy] za pośrednictwem [Sąd I instancji]
+Sygn. akt: [sygnatura]
+Apelujący: [dane]
+Przeciwnik: [dane]
+
+APELACJA
+od wyroku [Sąd I instancji] z dnia [data], sygn. akt [sygnatura]
+
+Na podstawie art. 367 § 1 KPC zaskarżam powyższy wyrok w [całości/części] i zarzucam:
+1. Naruszenie prawa materialnego — art. [nr] [kodeks] przez [błędną wykładnię/niewłaściwe zastosowanie]
+2. Naruszenie prawa procesowego — art. [nr] KPC przez [opis]
+3. Błąd w ustaleniach faktycznych przez [opis]
+
+Wnoszę o:
+1. Zmianę zaskarżonego wyroku przez [żądanie].
+2. Zasądzenie kosztów postępowania apelacyjnego.
+
+UZASADNIENIE
+[rozwinięcie zarzutów]
+
+WEZWANIE DO ZAPŁATY:
+[Miejscowość], [data]
+Nadawca: [dane wierzyciela]
+Adresat: [dane dłużnika]
+
+WEZWANIE DO ZAPŁATY
+
+Działając w imieniu [wierzyciela], wzywam do zapłaty kwoty [kwota] zł (słownie: [słownie] złotych) wynikającej z [podstawa: faktura/umowa/tytuł], w terminie 7 dni od dnia doręczenia niniejszego wezwania, na rachunek bankowy: [nr konta].
+
+W przypadku bezskutecznego upływu terminu sprawa zostanie skierowana na drogę postępowania sądowego, co narazi Państwa na dodatkowe koszty.
+
+WNIOSEK:
+[Miejscowość], [data]
+[Sąd], [Wydział]
+Sygn. akt: [sygnatura]
+Wnioskodawca: [dane]
+
+WNIOSEK [o zabezpieczenie / o zwolnienie od kosztów / o ...]
+
+Na podstawie art. [nr] KPC wnoszę o:
+1. [treść wniosku]
+
+UZASADNIENIE
+[uzasadnienie wniosku]
+
 Dostępne narzędzia:
-- create_client, list_clients, get_client — zarządzanie klientami
-- create_case, list_cases, get_case, update_case — zarządzanie sprawami
-- add_deadline, list_deadlines — terminy
-- draft_document, list_documents, get_document — pisma procesowe
+- create_client, list_clients, get_client, update_client, delete_client — zarządzanie klientami
+- create_case, list_cases, get_case, update_case, search_cases, delete_case — zarządzanie sprawami
+- add_deadline, list_deadlines, update_deadline, delete_deadline — terminy
+- draft_document, list_documents, get_document, delete_document — pisma procesowe
 - search_law, lookup_article — wyszukiwanie przepisów
 - add_case_note — notatki do spraw
+- set_active_case — ustaw aktywną sprawę (kontekst dla sesji)
+- clear_active_case — wyczyść aktywną sprawę
+- log_time, list_time_entries — śledzenie czasu pracy
+- generate_billing_summary — podsumowanie rozliczeniowe
+- save_template, list_templates, use_template — biblioteka szablonów dokumentów
 
 Bądź konkretny, profesjonalny i pomocny. Jeśli czegoś nie wiesz, powiedz to wprost.`;
+
+// =============================================================================
+// ACTIVE CASE CONTEXT
+// =============================================================================
+
+function buildSystemPrompt(session: Session, db: Database): string {
+  let prompt = SYSTEM_PROMPT;
+
+  const activeCaseId = session.metadata?.activeCaseId as string | undefined;
+  if (activeCaseId) {
+    const activeCase = db.getCase(activeCaseId);
+    if (activeCase) {
+      const client = db.getClient(activeCase.clientId);
+      const deadlines = db.listDeadlines({ caseId: activeCaseId, upcoming: true });
+      const parts = [
+        `\n\n--- AKTYWNA SPRAWA ---`,
+        `Tytuł: ${activeCase.title}`,
+      ];
+      if (activeCase.sygnatura) parts.push(`Sygnatura: ${activeCase.sygnatura}`);
+      if (activeCase.court) parts.push(`Sąd: ${activeCase.court}`);
+      parts.push(`Klient: ${client?.name ?? 'nieznany'}`);
+      parts.push(`Status: ${activeCase.status}`);
+      parts.push(`Dziedzina: ${activeCase.lawArea}`);
+      if (activeCase.description) parts.push(`Opis: ${activeCase.description}`);
+      if (deadlines.length > 0) {
+        parts.push(`Nadchodzące terminy:`);
+        for (const d of deadlines.slice(0, 5)) {
+          parts.push(`- ${d.title} (${d.date.toLocaleDateString('pl-PL')})`);
+        }
+      }
+      parts.push(`\nGdy użytkownik mówi o "tej sprawie" lub nie podaje ID sprawy, używaj aktywnej sprawy (ID: ${activeCaseId}).`);
+      prompt += parts.join('\n');
+    }
+  }
+
+  return prompt;
+}
+
+/** Resolve caseId from tool input, falling back to session's active case */
+function resolveCaseId(input: Record<string, unknown>, session: Session): string | undefined {
+  return (input.caseId as string | undefined) ?? (session.metadata?.activeCaseId as string | undefined);
+}
 
 // =============================================================================
 // TOOL DEFINITIONS
@@ -147,17 +288,17 @@ const TOOLS: ToolDef[] = [
   },
   {
     name: 'add_deadline',
-    description: 'Dodaj termin procesowy/ustawowy',
+    description: 'Dodaj termin procesowy/ustawowy (jeśli nie podano caseId, użyje aktywnej sprawy)',
     input_schema: {
       type: 'object',
       properties: {
-        caseId: { type: 'string', description: 'ID sprawy' },
+        caseId: { type: 'string', description: 'ID sprawy (opcjonalne jeśli jest aktywna sprawa)' },
         title: { type: 'string', description: 'Opis terminu' },
         date: { type: 'string', description: 'Data (YYYY-MM-DD)' },
         type: { type: 'string', enum: ['procesowy', 'ustawowy', 'umowny', 'wewnetrzny'] },
         reminderDaysBefore: { type: 'number', description: 'Dni przed terminem na przypomnienie' },
       },
-      required: ['caseId', 'title', 'date', 'type'],
+      required: ['title', 'date', 'type'],
     },
   },
   {
@@ -213,7 +354,7 @@ const TOOLS: ToolDef[] = [
       type: 'object',
       properties: {
         query: { type: 'string', description: 'Fraza wyszukiwania (np. "odszkodowanie", "przedawnienie")' },
-        codeName: { type: 'string', description: 'Skrót kodeksu (KC, KPC, KK, KP, KRO, KSH, KPA)', enum: ['KC', 'KPC', 'KK', 'KP', 'KRO', 'KSH', 'KPA'] },
+        codeName: { type: 'string', description: 'Skrót kodeksu (KC, KPC, KK, KPK, KP, KRO, KSH, KPA, KW)', enum: ['KC', 'KPC', 'KK', 'KPK', 'KP', 'KRO', 'KSH', 'KPA', 'KW'] },
       },
       required: ['query'],
     },
@@ -232,72 +373,345 @@ const TOOLS: ToolDef[] = [
   },
   {
     name: 'add_case_note',
-    description: 'Dodaj notatkę do sprawy',
+    description: 'Dodaj notatkę do sprawy (jeśli nie podano caseId, użyje aktywnej sprawy)',
     input_schema: {
       type: 'object',
       properties: {
-        caseId: { type: 'string', description: 'ID sprawy' },
+        caseId: { type: 'string', description: 'ID sprawy (opcjonalne jeśli jest aktywna sprawa)' },
         note: { type: 'string', description: 'Treść notatki' },
       },
-      required: ['caseId', 'note'],
+      required: ['note'],
+    },
+  },
+  {
+    name: 'set_active_case',
+    description: 'Ustaw aktywną sprawę — wszystkie kolejne komendy bez podanego caseId będą dotyczyć tej sprawy',
+    input_schema: {
+      type: 'object',
+      properties: {
+        caseId: { type: 'string', description: 'ID sprawy do ustawienia jako aktywna' },
+      },
+      required: ['caseId'],
+    },
+  },
+  {
+    name: 'clear_active_case',
+    description: 'Wyczyść aktywną sprawę (wyłącz kontekst sprawy)',
+    input_schema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  // ===== BILLING / TIME TRACKING =====
+  {
+    name: 'log_time',
+    description: 'Zarejestruj czas pracy nad sprawą (jeśli nie podano caseId, użyje aktywnej sprawy)',
+    input_schema: {
+      type: 'object',
+      properties: {
+        caseId: { type: 'string', description: 'ID sprawy (opcjonalne jeśli jest aktywna sprawa)' },
+        description: { type: 'string', description: 'Opis wykonanej pracy (np. "Analiza dokumentacji", "Przygotowanie pisma")' },
+        durationMinutes: { type: 'number', description: 'Czas w minutach' },
+        hourlyRate: { type: 'number', description: 'Stawka godzinowa PLN (opcjonalne)' },
+        date: { type: 'string', description: 'Data (YYYY-MM-DD, domyślnie dzisiaj)' },
+      },
+      required: ['description', 'durationMinutes'],
+    },
+  },
+  {
+    name: 'list_time_entries',
+    description: 'Listuj wpisy czasu pracy dla sprawy (jeśli nie podano caseId, użyje aktywnej sprawy)',
+    input_schema: {
+      type: 'object',
+      properties: {
+        caseId: { type: 'string', description: 'ID sprawy (opcjonalne jeśli jest aktywna sprawa)' },
+      },
+    },
+  },
+  {
+    name: 'generate_billing_summary',
+    description: 'Wygeneruj podsumowanie rozliczeniowe dla sprawy',
+    input_schema: {
+      type: 'object',
+      properties: {
+        caseId: { type: 'string', description: 'ID sprawy (opcjonalne jeśli jest aktywna sprawa)' },
+        hourlyRate: { type: 'number', description: 'Domyślna stawka godzinowa PLN (jeśli nie podano przy wpisach)' },
+      },
+    },
+  },
+  // ===== DOCUMENT TEMPLATES =====
+  {
+    name: 'save_template',
+    description: 'Zapisz dokument jako szablon wielokrotnego użytku',
+    input_schema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Nazwa szablonu (np. "Pozew o zapłatę")' },
+        type: { type: 'string', enum: ['pozew', 'odpowiedz_na_pozew', 'apelacja', 'zarzuty', 'sprzeciw', 'wezwanie_do_zaplaty', 'wniosek', 'pismo_procesowe', 'umowa', 'opinia_prawna', 'inne'] },
+        content: { type: 'string', description: 'Treść szablonu z placeholderami (np. [IMIE_POWODA], [KWOTA])' },
+        description: { type: 'string', description: 'Opis kiedy używać tego szablonu' },
+        lawArea: { type: 'string', description: 'Dziedzina prawa' },
+        tags: { type: 'string', description: 'Tagi oddzielone przecinkami (np. "zapłata,faktura,wierzytelność")' },
+      },
+      required: ['name', 'type', 'content'],
+    },
+  },
+  {
+    name: 'list_templates',
+    description: 'Listuj dostępne szablony dokumentów (opcjonalnie filtruj)',
+    input_schema: {
+      type: 'object',
+      properties: {
+        type: { type: 'string', description: 'Typ dokumentu' },
+        lawArea: { type: 'string', description: 'Dziedzina prawa' },
+        query: { type: 'string', description: 'Szukaj w nazwie, opisie i tagach' },
+      },
+    },
+  },
+  {
+    name: 'use_template',
+    description: 'Pobierz treść szablonu do wypełnienia (zwiększa licznik użyć)',
+    input_schema: {
+      type: 'object',
+      properties: {
+        templateId: { type: 'string', description: 'ID szablonu' },
+      },
+      required: ['templateId'],
+    },
+  },
+  {
+    name: 'update_document',
+    description: 'Edytuj istniejący dokument (tytuł, treść, notatki). Działa głównie na szkicach.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'ID dokumentu' },
+        title: { type: 'string', description: 'Nowy tytuł' },
+        content: { type: 'string', description: 'Nowa treść dokumentu' },
+        notes: { type: 'string', description: 'Notatki/uwagi' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'complete_deadline',
+    description: 'Oznacz termin jako zrealizowany/wykonany',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'ID terminu' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'update_deadline',
+    description: 'Zaktualizuj termin (tytuł, datę, typ, notatki, dni przypomnienia)',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'ID terminu' },
+        title: { type: 'string', description: 'Nowy tytuł' },
+        date: { type: 'string', description: 'Nowa data (YYYY-MM-DD)' },
+        type: { type: 'string', enum: ['procesowy', 'ustawowy', 'umowny', 'wewnetrzny'], description: 'Typ terminu' },
+        notes: { type: 'string', description: 'Notatki' },
+        reminderDaysBefore: { type: 'number', description: 'Dni przed terminem na przypomnienie' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'search_cases',
+    description: 'Wyszukaj sprawy po frazie (szuka w tytule, opisie, stronie przeciwnej, sygnaturze)',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Fraza wyszukiwania' },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'delete_document',
+    description: 'Usuń dokument (tylko szkice i dokumenty do sprawdzenia)',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'ID dokumentu' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'delete_deadline',
+    description: 'Usuń termin',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'ID terminu' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'update_client',
+    description: 'Zaktualizuj dane klienta (imię, email, telefon, adres, notatki)',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'ID klienta' },
+        name: { type: 'string', description: 'Imię i nazwisko / nazwa' },
+        email: { type: 'string', description: 'Adres email' },
+        phone: { type: 'string', description: 'Numer telefonu' },
+        address: { type: 'string', description: 'Adres' },
+        notes: { type: 'string', description: 'Notatki' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'delete_client',
+    description: 'Usuń klienta i wszystkie powiązane sprawy, dokumenty, terminy',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'ID klienta' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'delete_case',
+    description: 'Usuń sprawę i wszystkie powiązane dokumenty, terminy, wpisy czasu',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'ID sprawy' },
+      },
+      required: ['id'],
     },
   },
 ];
 
 // =============================================================================
+// INPUT VALIDATION HELPERS
+// =============================================================================
+
+function requireString(input: Record<string, unknown>, key: string): string | null {
+  const v = input[key];
+  if (typeof v !== 'string' || v.trim().length === 0) return null;
+  return v.trim();
+}
+
+function optString(input: Record<string, unknown>, key: string, maxLen = 10000): string | undefined {
+  const v = input[key];
+  if (v == null) return undefined;
+  if (typeof v !== 'string') return undefined;
+  return v.slice(0, maxLen);
+}
+
+function optNumber(input: Record<string, unknown>, key: string, min = -Infinity, max = Infinity): number | undefined {
+  const v = input[key];
+  if (v == null) return undefined;
+  const n = typeof v === 'number' ? v : Number(v);
+  if (!Number.isFinite(n) || n < min || n > max) return undefined;
+  return n;
+}
+
+function parseDate(input: Record<string, unknown>, key: string): Date | null {
+  const v = input[key];
+  if (v == null) return null;
+  const ms = Date.parse(String(v));
+  if (isNaN(ms)) return null;
+  return new Date(ms);
+}
+
+const VALID_CLIENT_TYPES = ['osoba_fizyczna', 'osoba_prawna'] as const;
+const VALID_LAW_AREAS = ['cywilne', 'karne', 'administracyjne', 'pracy', 'rodzinne', 'gospodarcze', 'podatkowe', 'egzekucyjne', 'inne'] as const;
+const VALID_DEADLINE_TYPES = ['procesowy', 'ustawowy', 'umowny', 'wewnetrzny'] as const;
+const VALID_DOC_TYPES = ['pozew', 'odpowiedz_na_pozew', 'apelacja', 'zarzuty', 'sprzeciw', 'wezwanie_do_zaplaty', 'wniosek', 'pismo_procesowe', 'umowa', 'opinia_prawna', 'notatka', 'inne'] as const;
+
+// =============================================================================
 // TOOL EXECUTION
 // =============================================================================
 
-function executeTool(name: string, input: Record<string, unknown>, db: Database): string {
+function executeTool(name: string, input: Record<string, unknown>, db: Database, session: Session): string {
   try {
     switch (name) {
       case 'create_client': {
+        const clientName = requireString(input, 'name');
+        if (!clientName) return JSON.stringify({ error: 'Imię/nazwa klienta jest wymagane.' });
+        const rawType = optString(input, 'type') ?? 'osoba_fizyczna';
+        if (!VALID_CLIENT_TYPES.includes(rawType as any)) return JSON.stringify({ error: `Typ klienta musi być: ${VALID_CLIENT_TYPES.join(', ')}` });
+        const pesel = optString(input, 'pesel');
+        if (pesel && !/^\d{11}$/.test(pesel)) {
+          return JSON.stringify({ error: 'PESEL musi składać się z 11 cyfr.' });
+        }
+        const nip = optString(input, 'nip');
+        if (nip && !/^\d{10}$/.test(nip.replace(/[-\s]/g, ''))) {
+          return JSON.stringify({ error: 'NIP musi składać się z 10 cyfr.' });
+        }
         const client = db.createClient({
-          name: input.name as string,
-          type: (input.type as any) ?? 'osoba_fizyczna',
-          pesel: input.pesel as string | undefined,
-          nip: input.nip as string | undefined,
-          email: input.email as string | undefined,
-          phone: input.phone as string | undefined,
-          address: input.address as string | undefined,
+          name: clientName,
+          type: rawType as any,
+          pesel,
+          nip: nip ? nip.replace(/[-\s]/g, '') : undefined,
+          email: optString(input, 'email'),
+          phone: optString(input, 'phone'),
+          address: optString(input, 'address'),
         });
         return JSON.stringify({ success: true, client });
       }
       case 'list_clients': {
-        const clients = input.query
-          ? db.searchClients(input.query as string)
+        const q = optString(input, 'query');
+        const clients = q
+          ? db.searchClients(q)
           : db.listClients();
         return JSON.stringify({ clients, count: clients.length });
       }
       case 'get_client': {
-        const client = db.getClient(input.id as string);
+        const clientGetId = requireString(input, 'id');
+        if (!clientGetId) return JSON.stringify({ error: 'ID klienta jest wymagane.' });
+        const client = db.getClient(clientGetId);
         if (!client) return JSON.stringify({ error: 'Klient nie znaleziony' });
         return JSON.stringify(client);
       }
       case 'create_case': {
+        const caseClientId = requireString(input, 'clientId');
+        if (!caseClientId) return JSON.stringify({ error: 'ID klienta (clientId) jest wymagane.' });
+        if (!db.getClient(caseClientId)) return JSON.stringify({ error: 'Klient nie znaleziony — najpierw utwórz klienta (create_client).' });
+        const caseTitle = requireString(input, 'title');
+        if (!caseTitle) return JSON.stringify({ error: 'Tytuł sprawy jest wymagany.' });
+        const rawLawArea = optString(input, 'lawArea') ?? 'cywilne';
+        if (!VALID_LAW_AREAS.includes(rawLawArea as any)) return JSON.stringify({ error: `Dziedzina prawa musi być: ${VALID_LAW_AREAS.join(', ')}` });
         const legalCase = db.createCase({
-          clientId: input.clientId as string,
-          title: input.title as string,
-          lawArea: (input.lawArea as any) ?? 'cywilne',
+          clientId: caseClientId,
+          title: caseTitle,
+          lawArea: rawLawArea as any,
           status: 'nowa',
-          sygnatura: input.sygnatura as string | undefined,
-          court: input.court as string | undefined,
-          description: input.description as string | undefined,
-          opposingParty: input.opposingParty as string | undefined,
-          valueOfDispute: input.valueOfDispute as number | undefined,
+          sygnatura: optString(input, 'sygnatura'),
+          court: optString(input, 'court'),
+          description: optString(input, 'description'),
+          opposingParty: optString(input, 'opposingParty'),
+          valueOfDispute: optNumber(input, 'valueOfDispute', 0),
         });
         return JSON.stringify({ success: true, case: legalCase });
       }
       case 'list_cases': {
+        const lcClientId = optString(input, 'clientId');
+        const lcStatus = optString(input, 'status');
+        const lcLawArea = optString(input, 'lawArea');
         const cases = db.listCases({
-          clientId: input.clientId as string | undefined,
-          status: input.status as string | undefined,
-          lawArea: input.lawArea as string | undefined,
+          clientId: lcClientId,
+          status: lcStatus,
+          lawArea: lcLawArea,
         });
         return JSON.stringify({ cases, count: cases.length });
       }
       case 'get_case': {
-        const c = db.getCase(input.id as string);
+        const getCaseId = requireString(input, 'id');
+        if (!getCaseId) return JSON.stringify({ error: 'ID sprawy jest wymagane.' });
+        const c = db.getCase(getCaseId);
         if (!c) return JSON.stringify({ error: 'Sprawa nie znaleziona' });
         const deadlines = db.listDeadlines({ caseId: c.id });
         const documents = db.listDocuments({ caseId: c.id });
@@ -305,48 +719,123 @@ function executeTool(name: string, input: Record<string, unknown>, db: Database)
         return JSON.stringify({ case: c, client, deadlines, documents: documents.map(d => ({ id: d.id, title: d.title, type: d.type, status: d.status })) });
       }
       case 'update_case': {
-        const id = input.id as string;
+        const updateCaseId = requireString(input, 'id');
+        if (!updateCaseId) return JSON.stringify({ error: 'ID sprawy jest wymagane.' });
         const updates: Record<string, unknown> = {};
-        if (input.status) updates.status = input.status;
-        if (input.sygnatura) updates.sygnatura = input.sygnatura;
-        if (input.court) updates.court = input.court;
-        if (input.notes) updates.notes = input.notes;
-        const updated = db.updateCase(id, updates as any);
+        if (input.status !== undefined) updates.status = optString(input, 'status');
+        if (input.sygnatura !== undefined) updates.sygnatura = optString(input, 'sygnatura');
+        if (input.court !== undefined) updates.court = optString(input, 'court');
+        if (input.notes !== undefined) updates.notes = optString(input, 'notes');
+        if (input.description !== undefined) updates.description = optString(input, 'description');
+        if (input.opposingParty !== undefined) updates.opposingParty = optString(input, 'opposingParty');
+        const updated = db.updateCase(updateCaseId, updates as any);
         if (!updated) return JSON.stringify({ error: 'Sprawa nie znaleziona' });
         return JSON.stringify({ success: true, case: updated });
       }
       case 'add_deadline': {
+        const deadlineCaseId = resolveCaseId(input, session);
+        if (!deadlineCaseId) return JSON.stringify({ error: 'Brak ID sprawy. Podaj caseId lub ustaw aktywną sprawę (set_active_case).' });
+        if (!db.getCase(deadlineCaseId)) return JSON.stringify({ error: 'Sprawa nie znaleziona.' });
+        const dlTitle = requireString(input, 'title');
+        if (!dlTitle) return JSON.stringify({ error: 'Tytuł terminu jest wymagany.' });
+        const dlDate = parseDate(input, 'date');
+        if (!dlDate) return JSON.stringify({ error: 'Data terminu jest wymagana (format ISO, np. 2025-03-15).' });
+        const rawDlType = optString(input, 'type') ?? 'procesowy';
+        if (!VALID_DEADLINE_TYPES.includes(rawDlType as any)) return JSON.stringify({ error: `Typ terminu musi być: ${VALID_DEADLINE_TYPES.join(', ')}` });
+        const reminderDays = optNumber(input, 'reminderDaysBefore', 0, 365) ?? 3;
         const deadline = db.createDeadline({
-          caseId: input.caseId as string,
-          title: input.title as string,
-          date: new Date(input.date as string),
-          type: (input.type as any) ?? 'procesowy',
+          caseId: deadlineCaseId,
+          title: dlTitle,
+          date: dlDate,
+          type: rawDlType as any,
           completed: false,
-          reminderDaysBefore: (input.reminderDaysBefore as number) ?? 3,
+          reminderDaysBefore: reminderDays,
         });
         return JSON.stringify({ success: true, deadline });
       }
       case 'list_deadlines': {
         const deadlines = db.listDeadlines({
-          caseId: input.caseId as string | undefined,
+          caseId: resolveCaseId(input, session),
           upcoming: input.upcoming as boolean | undefined,
         });
         return JSON.stringify({ deadlines, count: deadlines.length });
       }
       case 'draft_document': {
+        const docCaseId = resolveCaseId(input, session);
+        const rawDocType = optString(input, 'type') ?? 'pismo_procesowe';
+        if (!VALID_DOC_TYPES.includes(rawDocType as any)) return JSON.stringify({ error: `Typ dokumentu musi być: ${VALID_DOC_TYPES.join(', ')}` });
+        const docType = rawDocType;
+        const docTitle = requireString(input, 'title');
+        if (!docTitle) return JSON.stringify({ error: 'Tytuł dokumentu jest wymagany.' });
+        const content = requireString(input, 'content');
+        if (!content) return JSON.stringify({ error: 'Treść dokumentu jest wymagana.' });
+        if (content.length > 100000) return JSON.stringify({ error: 'Treść dokumentu jest zbyt długa (max 100 000 znaków).' });
+        const contentLower = content.toLowerCase();
+
+        // Pre-draft validation: check if case has required data
+        const warnings: string[] = [];
+        if (docCaseId) {
+          const docCase = db.getCase(docCaseId);
+          if (docCase) {
+            if (['pozew', 'apelacja', 'odpowiedz_na_pozew'].includes(docType) && !docCase.valueOfDispute) {
+              warnings.push('Brak wartosci przedmiotu sporu (WPS) w sprawie — wymagane w pozwie/apelacji.');
+            }
+            if (['apelacja', 'odpowiedz_na_pozew'].includes(docType) && !docCase.sygnatura) {
+              warnings.push('Brak sygnatury akt — wymagane w odpowiedzi i apelacji.');
+            }
+            if (!docCase.court && ['pozew', 'apelacja', 'odpowiedz_na_pozew', 'wniosek'].includes(docType)) {
+              warnings.push('Brak nazwy sadu w sprawie — uzupelnij dane sprawy.');
+            }
+          }
+        }
+
+        // Content validation: check for required sections by document type
+        const sectionChecks: Record<string, string[]> = {
+          pozew: ['uzasadnienie', 'podstawa prawna', 'wnosz'],
+          odpowiedz_na_pozew: ['uzasadnienie', 'zarzut'],
+          apelacja: ['zarzuc', 'uzasadnienie', 'zaskar'],
+          wezwanie_do_zaplaty: ['termin', 'zaplat'],
+          wniosek: ['wnosz', 'uzasadnienie'],
+        };
+        const requiredSections = sectionChecks[docType];
+        if (requiredSections) {
+          for (const section of requiredSections) {
+            if (!contentLower.includes(section)) {
+              warnings.push(`Brak sekcji zawierajacej "${section}" — sprawdz kompletnosc dokumentu.`);
+            }
+          }
+        }
+
+        // Filing checklist
+        const checklist = [
+          'Sprawdz dane stron (imiona, adresy, PESEL/NIP)',
+          'Zweryfikuj przywolane artykuly i ich aktualnosc',
+          'Sprawdz wlasciwosc sadu (miejscowa i rzeczowa)',
+          'Zweryfikuj terminy procesowe',
+          'Dolacz wymagane zalaczniki i dowody',
+          'Podpisz dokument',
+        ];
+
         const doc = db.createDocument({
-          caseId: input.caseId as string | undefined,
-          type: (input.type as any) ?? 'pismo_procesowe',
-          title: input.title as string,
-          content: input.content as string,
+          caseId: docCaseId,
+          type: docType as any,
+          title: docTitle,
+          content,
           status: 'szkic',
           version: 1,
         });
-        return JSON.stringify({ success: true, document: { id: doc.id, title: doc.title, type: doc.type, status: doc.status }, message: 'Dokument zapisany jako SZKIC. Wymaga weryfikacji prawnika.' });
+
+        return JSON.stringify({
+          success: true,
+          document: { id: doc.id, title: doc.title, type: doc.type, status: doc.status },
+          message: 'Dokument zapisany jako SZKIC. Wymaga weryfikacji prawnika.',
+          warnings: warnings.length > 0 ? warnings : undefined,
+          checklist,
+        });
       }
       case 'list_documents': {
         const docs = db.listDocuments({
-          caseId: input.caseId as string | undefined,
+          caseId: resolveCaseId(input, session),
           status: input.status as string | undefined,
           type: input.type as string | undefined,
         });
@@ -358,43 +847,319 @@ function executeTool(name: string, input: Record<string, unknown>, db: Database)
         return JSON.stringify(doc);
       }
       case 'search_law': {
+        const query = requireString(input, 'query');
+        if (!query) return JSON.stringify({ error: 'Zapytanie (query) jest wymagane.' });
         const articles = db.searchArticles(
-          input.query as string,
-          input.codeName as string | undefined,
+          query.slice(0, 500),
+          optString(input, 'codeName')?.toUpperCase(),
           10
         );
         if (articles.length === 0) {
-          return JSON.stringify({ message: 'Nie znaleziono przepisów. Baza wiedzy może wymagać załadowania (npm run ingest).', results: [] });
+          return JSON.stringify({ message: 'Nie znaleziono przepisów pasujących do zapytania. Baza wiedzy może wymagać załadowania (npm run ingest).', results: [] });
         }
-        return JSON.stringify({ results: articles, count: articles.length });
+        // Return formatted, readable article text for the LLM
+        const formatted = articles.map(a => {
+          const header = `Art. ${a.articleNumber} ${a.codeName}`;
+          const location = [a.chapter, a.section].filter(Boolean).join(' > ');
+          return `${header}${location ? ` (${location})` : ''}\n${a.content}`;
+        });
+        return JSON.stringify({
+          count: articles.length,
+          query,
+          articles: formatted.join('\n\n---\n\n'),
+        });
       }
       case 'lookup_article': {
-        const article = db.getArticle(
-          input.codeName as string,
-          input.articleNumber as string
-        );
+        const rawCodeName = requireString(input, 'codeName');
+        if (!rawCodeName) return JSON.stringify({ error: 'Nazwa kodeksu (codeName) jest wymagana, np. KC, KPC, KK.' });
+        const codeName = rawCodeName.toUpperCase();
+        const rawArticleNum = requireString(input, 'articleNumber');
+        if (!rawArticleNum) return JSON.stringify({ error: 'Numer artykułu jest wymagany.' });
+        const articleNumber = rawArticleNum.replace(/^art\.?\s*/i, '').trim();
+        const article = db.getArticle(codeName, articleNumber);
         if (!article) {
-          return JSON.stringify({ error: `Nie znaleziono art. ${input.articleNumber} ${input.codeName}. Baza wiedzy może wymagać załadowania.` });
+          return JSON.stringify({ error: `Nie znaleziono art. ${articleNumber} ${codeName}. Baza wiedzy może wymagać załadowania.` });
         }
-        return JSON.stringify(article);
+        const location = [article.chapter, article.section].filter(Boolean).join(' > ');
+        return JSON.stringify({
+          header: `Art. ${article.articleNumber} ${article.codeName}`,
+          location: location || undefined,
+          content: article.content,
+        });
       }
       case 'add_case_note': {
-        const existing = db.getCase(input.caseId as string);
+        const noteCaseId = resolveCaseId(input, session);
+        if (!noteCaseId) return JSON.stringify({ error: 'Brak ID sprawy. Podaj caseId lub ustaw aktywną sprawę (set_active_case).' });
+        const existing = db.getCase(noteCaseId);
         if (!existing) return JSON.stringify({ error: 'Sprawa nie znaleziona' });
         const currentNotes = existing.notes ?? '';
         const timestamp = new Date().toLocaleString('pl-PL');
         const newNotes = currentNotes
           ? `${currentNotes}\n\n[${timestamp}] ${input.note}`
           : `[${timestamp}] ${input.note}`;
-        db.updateCase(input.caseId as string, { notes: newNotes });
+        db.updateCase(noteCaseId, { notes: newNotes });
         return JSON.stringify({ success: true, message: 'Notatka dodana do sprawy' });
+      }
+      case 'set_active_case': {
+        const caseId = input.caseId as string;
+        const c = db.getCase(caseId);
+        if (!c) return JSON.stringify({ error: 'Sprawa nie znaleziona' });
+        if (!session.metadata) session.metadata = {};
+        session.metadata.activeCaseId = caseId;
+        const client = db.getClient(c.clientId);
+        return JSON.stringify({
+          success: true,
+          message: `Aktywna sprawa: "${c.title}"${c.sygnatura ? ` (${c.sygnatura})` : ''} — klient: ${client?.name ?? 'nieznany'}`,
+          case: { id: c.id, title: c.title, sygnatura: c.sygnatura, status: c.status },
+        });
+      }
+      case 'clear_active_case': {
+        if (session.metadata) delete session.metadata.activeCaseId;
+        return JSON.stringify({ success: true, message: 'Aktywna sprawa wyczyszczona.' });
+      }
+      // ===== BILLING / TIME TRACKING =====
+      case 'log_time': {
+        const timeCaseId = resolveCaseId(input, session);
+        if (!timeCaseId) return JSON.stringify({ error: 'Brak ID sprawy. Podaj caseId lub ustaw aktywną sprawę (set_active_case).' });
+        const caseCheck = db.getCase(timeCaseId);
+        if (!caseCheck) return JSON.stringify({ error: 'Sprawa nie znaleziona' });
+        const durationMinutes = optNumber(input, 'durationMinutes', 1, 14400);
+        if (!durationMinutes) {
+          return JSON.stringify({ error: 'Czas (durationMinutes) musi być liczbą od 1 do 14400.' });
+        }
+        const timeDesc = requireString(input, 'description');
+        if (!timeDesc) return JSON.stringify({ error: 'Opis czynności jest wymagany.' });
+        const timeDate = input.date ? parseDate(input, 'date') : new Date();
+        if (!timeDate) return JSON.stringify({ error: 'Nieprawidłowy format daty.' });
+        const entry = db.createTimeEntry({
+          caseId: timeCaseId,
+          description: timeDesc,
+          durationMinutes,
+          hourlyRate: optNumber(input, 'hourlyRate', 1, 10000),
+          date: timeDate,
+        });
+        const hours = Math.floor(durationMinutes / 60);
+        const mins = durationMinutes % 60;
+        const timeStr = hours > 0 ? `${hours}h ${mins}min` : `${mins}min`;
+        return JSON.stringify({
+          success: true,
+          entry: { id: entry.id, description: entry.description, duration: timeStr },
+          message: `Zarejestrowano ${timeStr} pracy: "${entry.description}"`,
+        });
+      }
+      case 'list_time_entries': {
+        const entryCaseId = resolveCaseId(input, session);
+        if (!entryCaseId) return JSON.stringify({ error: 'Brak ID sprawy. Podaj caseId lub ustaw aktywną sprawę (set_active_case).' });
+        const entries = db.listTimeEntries(entryCaseId);
+        const totalMinutes = entries.reduce((sum, e) => sum + e.durationMinutes, 0);
+        const totalHours = (totalMinutes / 60).toFixed(1);
+        return JSON.stringify({
+          entries: entries.map(e => ({
+            id: e.id,
+            description: e.description,
+            durationMinutes: e.durationMinutes,
+            hourlyRate: e.hourlyRate,
+            date: e.date.toLocaleDateString('pl-PL'),
+          })),
+          count: entries.length,
+          totalMinutes,
+          totalHours: `${totalHours}h`,
+        });
+      }
+      case 'generate_billing_summary': {
+        const billCaseId = resolveCaseId(input, session);
+        if (!billCaseId) return JSON.stringify({ error: 'Brak ID sprawy. Podaj caseId lub ustaw aktywną sprawę (set_active_case).' });
+        const billCase = db.getCase(billCaseId);
+        if (!billCase) return JSON.stringify({ error: 'Sprawa nie znaleziona' });
+        const billClient = db.getClient(billCase.clientId);
+        const entries = db.listTimeEntries(billCaseId);
+        if (entries.length === 0) return JSON.stringify({ message: 'Brak wpisów czasu pracy dla tej sprawy.' });
+        const defaultRate = (input.hourlyRate as number) ?? 300; // default 300 PLN/h
+        let totalMinutes = 0;
+        let totalAmount = 0;
+        const lineItems = entries.map(e => {
+          const rate = e.hourlyRate ?? defaultRate;
+          const amount = (e.durationMinutes / 60) * rate;
+          totalMinutes += e.durationMinutes;
+          totalAmount += amount;
+          return {
+            date: e.date.toLocaleDateString('pl-PL'),
+            description: e.description,
+            duration: `${e.durationMinutes} min`,
+            rate: `${rate} PLN/h`,
+            amount: `${amount.toFixed(2)} PLN`,
+          };
+        });
+        return JSON.stringify({
+          summary: {
+            case: billCase.title,
+            sygnatura: billCase.sygnatura,
+            client: billClient?.name ?? 'nieznany',
+            totalHours: `${(totalMinutes / 60).toFixed(1)}h`,
+            totalMinutes,
+            totalAmount: `${totalAmount.toFixed(2)} PLN`,
+            defaultHourlyRate: `${defaultRate} PLN/h`,
+          },
+          lineItems,
+        });
+      }
+      // ===== DOCUMENT TEMPLATES =====
+      case 'save_template': {
+        const tplName = requireString(input, 'name');
+        if (!tplName) return JSON.stringify({ error: 'Nazwa szablonu jest wymagana.' });
+        const tplContent = requireString(input, 'content');
+        if (!tplContent) return JSON.stringify({ error: 'Treść szablonu jest wymagana.' });
+        const rawTplType = optString(input, 'type') ?? 'pismo_procesowe';
+        if (!VALID_DOC_TYPES.includes(rawTplType as any)) return JSON.stringify({ error: `Typ szablonu musi być: ${VALID_DOC_TYPES.join(', ')}` });
+        const template = db.createTemplate({
+          name: tplName,
+          type: rawTplType as any,
+          content: tplContent,
+          description: optString(input, 'description'),
+          lawArea: optString(input, 'lawArea') as any,
+          tags: optString(input, 'tags'),
+        });
+        return JSON.stringify({
+          success: true,
+          template: { id: template.id, name: template.name, type: template.type },
+          message: `Szablon "${template.name}" zapisany. Użyj: use_template z ID: ${template.id}`,
+        });
+      }
+      case 'list_templates': {
+        const templates = db.listTemplates({
+          type: input.type as string | undefined,
+          lawArea: input.lawArea as string | undefined,
+          query: input.query as string | undefined,
+        });
+        return JSON.stringify({
+          templates: templates.map(t => ({
+            id: t.id, name: t.name, type: t.type,
+            description: t.description, lawArea: t.lawArea,
+            tags: t.tags, useCount: t.useCount,
+          })),
+          count: templates.length,
+        });
+      }
+      case 'use_template': {
+        const template = db.getTemplate(input.templateId as string);
+        if (!template) return JSON.stringify({ error: 'Szablon nie znaleziony' });
+        db.incrementTemplateUseCount(template.id);
+        return JSON.stringify({
+          template: {
+            id: template.id, name: template.name, type: template.type,
+            description: template.description,
+          },
+          content: template.content,
+          message: `Szablon "${template.name}" — wypełnij placeholdery i dostosuj do sprawy.`,
+        });
+      }
+      case 'update_document': {
+        const udId = requireString(input, 'id');
+        if (!udId) return JSON.stringify({ error: 'ID dokumentu jest wymagane.' });
+        const existing = db.getDocument(udId);
+        if (!existing) return JSON.stringify({ error: 'Dokument nie znaleziony.' });
+        if (existing.status === 'zatwierdzony' || existing.status === 'zlozony') {
+          return JSON.stringify({ error: `Nie można edytować dokumentu o statusie "${existing.status}". Utwórz nową wersję.` });
+        }
+        const udUpdates: Record<string, unknown> = {};
+        if (input.title !== undefined) udUpdates.title = optString(input, 'title');
+        if (input.content !== undefined) {
+          const udContent = optString(input, 'content', 100000);
+          if (udContent && udContent.length > 100000) return JSON.stringify({ error: 'Treść za długa (maks. 100 000 znaków).' });
+          udUpdates.content = udContent;
+        }
+        if (input.notes !== undefined) udUpdates.notes = optString(input, 'notes');
+        const updatedDoc = db.updateDocument(udId, udUpdates as any);
+        if (!updatedDoc) return JSON.stringify({ error: 'Nie udało się zaktualizować dokumentu.' });
+        return JSON.stringify({ success: true, document: { id: updatedDoc.id, title: updatedDoc.title, status: updatedDoc.status } });
+      }
+      case 'complete_deadline': {
+        const cdId = requireString(input, 'id');
+        if (!cdId) return JSON.stringify({ error: 'ID terminu jest wymagane.' });
+        db.completeDeadline(cdId);
+        return JSON.stringify({ success: true, message: 'Termin oznaczony jako wykonany.' });
+      }
+      case 'update_deadline': {
+        const udlId = requireString(input, 'id');
+        if (!udlId) return JSON.stringify({ error: 'ID terminu jest wymagane.' });
+        const udlUpdates: Partial<{ title: string; date: Date; type: string; notes: string; reminderDaysBefore: number }> = {};
+        if (input.title !== undefined) udlUpdates.title = optString(input, 'title');
+        if (input.date !== undefined) {
+          const d = parseDate(input, 'date');
+          if (!d) return JSON.stringify({ error: 'Nieprawidłowy format daty.' });
+          udlUpdates.date = d;
+        }
+        if (input.type !== undefined) {
+          const t = optString(input, 'type');
+          if (t && !VALID_DEADLINE_TYPES.includes(t as any)) return JSON.stringify({ error: `Typ terminu musi być: ${VALID_DEADLINE_TYPES.join(', ')}` });
+          udlUpdates.type = t;
+        }
+        if (input.notes !== undefined) udlUpdates.notes = optString(input, 'notes');
+        if (input.reminderDaysBefore !== undefined) {
+          udlUpdates.reminderDaysBefore = optNumber(input, 'reminderDaysBefore', 0, 365);
+        }
+        const updatedDl = db.updateDeadline(udlId, udlUpdates as any);
+        if (!updatedDl) return JSON.stringify({ error: 'Termin nie znaleziony.' });
+        return JSON.stringify({ success: true, deadline: updatedDl });
+      }
+      case 'search_cases': {
+        const scQuery = requireString(input, 'query');
+        if (!scQuery) return JSON.stringify({ error: 'Fraza wyszukiwania jest wymagana.' });
+        const results = db.searchCases(scQuery.slice(0, 500));
+        return JSON.stringify({ cases: results, count: results.length });
+      }
+      case 'delete_document': {
+        const ddId = requireString(input, 'id');
+        if (!ddId) return JSON.stringify({ error: 'ID dokumentu jest wymagane.' });
+        const ddDoc = db.getDocument(ddId);
+        if (!ddDoc) return JSON.stringify({ error: 'Dokument nie znaleziony.' });
+        if (ddDoc.status === 'zatwierdzony' || ddDoc.status === 'zlozony') {
+          return JSON.stringify({ error: `Nie można usunąć dokumentu o statusie "${ddDoc.status}".` });
+        }
+        db.deleteDocument(ddId);
+        return JSON.stringify({ success: true, message: `Dokument "${ddDoc.title}" usunięty.` });
+      }
+      case 'delete_deadline': {
+        const delDlId = requireString(input, 'id');
+        if (!delDlId) return JSON.stringify({ error: 'ID terminu jest wymagane.' });
+        db.deleteDeadline(delDlId);
+        return JSON.stringify({ success: true, message: 'Termin usunięty.' });
+      }
+      case 'update_client': {
+        const ucId = requireString(input, 'id');
+        if (!ucId) return JSON.stringify({ error: 'ID klienta jest wymagane.' });
+        if (!db.getClient(ucId)) return JSON.stringify({ error: 'Klient nie znaleziony.' });
+        const ucUpdates: Record<string, unknown> = {};
+        if (input.name !== undefined) ucUpdates.name = optString(input, 'name');
+        if (input.email !== undefined) ucUpdates.email = optString(input, 'email');
+        if (input.phone !== undefined) ucUpdates.phone = optString(input, 'phone');
+        if (input.address !== undefined) ucUpdates.address = optString(input, 'address');
+        if (input.notes !== undefined) ucUpdates.notes = optString(input, 'notes');
+        const updatedClient = db.updateClient(ucId, ucUpdates as any);
+        if (!updatedClient) return JSON.stringify({ error: 'Nie udało się zaktualizować klienta.' });
+        return JSON.stringify({ success: true, client: updatedClient });
+      }
+      case 'delete_client': {
+        const dcId = requireString(input, 'id');
+        if (!dcId) return JSON.stringify({ error: 'ID klienta jest wymagane.' });
+        if (!db.getClient(dcId)) return JSON.stringify({ error: 'Klient nie znaleziony.' });
+        db.deleteClient(dcId);
+        return JSON.stringify({ success: true, message: 'Klient i powiązane dane usunięte.' });
+      }
+      case 'delete_case': {
+        const delCaseId = requireString(input, 'id');
+        if (!delCaseId) return JSON.stringify({ error: 'ID sprawy jest wymagane.' });
+        if (!db.getCase(delCaseId)) return JSON.stringify({ error: 'Sprawa nie znaleziona.' });
+        db.deleteCase(delCaseId);
+        return JSON.stringify({ success: true, message: 'Sprawa i powiązane dane usunięte.' });
       }
       default:
         return JSON.stringify({ error: `Nieznane narzędzie: ${name}` });
     }
   } catch (err) {
     logger.error({ err, tool: name }, 'Tool execution error');
-    return JSON.stringify({ error: `Błąd wykonania narzędzia: ${(err as Error).message}` });
+    const msg = err instanceof Error ? err.message.slice(0, 100) : 'unknown';
+    return JSON.stringify({ error: `Błąd wykonania narzędzia ${name}: ${msg}` });
   }
 }
 
@@ -412,7 +1177,18 @@ export function createAgent(config: Config, db: Database): Agent {
       if (config.agent.provider === 'anthropic' && config.agent.anthropicKey) {
         return handleWithAnthropic(text, session, config, db);
       }
-      return handleWithOllama(text, session, config, db);
+      // Ollama primary — fall back to Anthropic if Ollama fails and key is available
+      try {
+        return await handleWithOllama(text, session, config, db);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : '';
+        const isOllamaDown = msg.includes('nie jest uruchomiony') || msg.includes('nie odpowiedział') || msg.includes('Nie można połączyć');
+        if (isOllamaDown && config.agent.anthropicKey) {
+          logger.warn({ err: msg }, 'Ollama niedostępna — przełączam na Anthropic');
+          return handleWithAnthropic(text, session, config, db);
+        }
+        throw err;
+      }
     },
   };
 }
@@ -430,7 +1206,7 @@ async function handleWithAnthropic(
   const client = new Anthropic({ apiKey: config.agent.anthropicKey });
 
   const messages: Array<{ role: 'user' | 'assistant'; content: any }> = [];
-  for (const msg of session.messages.slice(-20)) {
+  for (const msg of (session.messages ?? []).slice(-20)) {
     if (msg.role === 'user' || msg.role === 'assistant') {
       messages.push({ role: msg.role, content: msg.content });
     }
@@ -442,11 +1218,18 @@ async function handleWithAnthropic(
     input_schema: t.input_schema as any,
   }));
 
+  const systemPrompt = buildSystemPrompt(session, db);
+
+  const anthropicModel = config.agent.model.startsWith('claude') ? config.agent.model : 'claude-sonnet-4-5-20250929';
+  if (!config.agent.model.startsWith('claude')) {
+    logger.warn({ configured: config.agent.model, using: anthropicModel }, 'Model name nie zaczyna się od "claude" — użyto domyślnego');
+  }
+
   let response = await client.messages.create({
-    model: config.agent.model.startsWith('claude') ? config.agent.model : 'claude-sonnet-4-5-20250929',
+    model: anthropicModel,
     max_tokens: config.agent.maxTokens,
     temperature: config.agent.temperature,
-    system: SYSTEM_PROMPT,
+    system: systemPrompt,
     tools: anthropicTools,
     messages,
   });
@@ -459,27 +1242,30 @@ async function handleWithAnthropic(
 
     const toolResults: Array<{ type: 'tool_result'; tool_use_id: string; content: string }> = [];
     for (const block of assistantContent) {
-      if (block.type === 'tool_use') {
+      if (block.type === 'tool_use' && block.id && block.name) {
         logger.info({ tool: block.name }, 'Executing tool');
-        const result = executeTool(block.name, block.input as Record<string, unknown>, db);
+        const result = executeTool(block.name, block.input as Record<string, unknown>, db, session);
         toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: result });
       }
     }
 
+    // No tool_use blocks found despite stop_reason — break to avoid infinite loop
+    if (toolResults.length === 0) break;
+
     messages.push({ role: 'user', content: toolResults as any });
 
     response = await client.messages.create({
-      model: config.agent.model.startsWith('claude') ? config.agent.model : 'claude-sonnet-4-5-20250929',
+      model: anthropicModel,
       max_tokens: config.agent.maxTokens,
       temperature: config.agent.temperature,
-      system: SYSTEM_PROMPT,
+      system: buildSystemPrompt(session, db),
       tools: anthropicTools,
       messages,
     });
   }
 
   const textBlocks = response.content.filter((b: any) => b.type === 'text');
-  return textBlocks.map((b: any) => b.text).join('\n') || null;
+  return textBlocks.map((b: any) => b.text ?? '').filter(Boolean).join('\n') || null;
 }
 
 // =============================================================================
@@ -494,7 +1280,7 @@ async function handleWithOllama(
 ): Promise<string | null> {
   const ollamaUrl = config.agent.ollamaUrl;
 
-  const conversationHistory = session.messages.slice(-20).map(msg => ({
+  const conversationHistory = (session.messages ?? []).slice(-20).map(msg => ({
     role: msg.role,
     content: msg.content,
   }));
@@ -503,7 +1289,7 @@ async function handleWithOllama(
     `- ${t.name}: ${t.description}`
   ).join('\n');
 
-  const systemWithTools = `${SYSTEM_PROMPT}
+  const systemWithTools = `${buildSystemPrompt(session, db)}
 
 Aby użyć narzędzia, odpowiedz TYLKO formatem JSON (bez żadnego innego tekstu):
 {"tool": "nazwa_narzedzia", "input": {"param1": "wartosc1"}}
@@ -513,21 +1299,21 @@ ${toolDescriptions}
 
 Jeśli nie musisz używać narzędzia, odpowiedz normalnym tekstem.`;
 
-  let response = await callOllama(ollamaUrl, config.agent.model, systemWithTools, conversationHistory);
+  let response = await callOllama(ollamaUrl, config.agent.model, systemWithTools, conversationHistory, config.agent.temperature, config.agent.maxTokens);
 
   let turns = 0;
-  while (turns < 5) {
+  while (turns < 10) {
     const toolCall = parseToolCall(response);
     if (!toolCall) break;
 
     turns++;
     logger.info({ tool: toolCall.tool }, 'Ollama tool call');
-    const result = executeTool(toolCall.tool, toolCall.input, db);
+    const result = executeTool(toolCall.tool, toolCall.input, db, session);
 
     conversationHistory.push({ role: 'assistant', content: response });
     conversationHistory.push({ role: 'user', content: `Wynik narzędzia ${toolCall.tool}:\n${result}\n\nTeraz odpowiedz użytkownikowi na podstawie wyniku narzędzia.` });
 
-    response = await callOllama(ollamaUrl, config.agent.model, systemWithTools, conversationHistory);
+    response = await callOllama(ollamaUrl, config.agent.model, systemWithTools, conversationHistory, config.agent.temperature, config.agent.maxTokens);
   }
 
   return response || null;
@@ -559,7 +1345,9 @@ async function callOllama(
   baseUrl: string,
   model: string,
   system: string,
-  messages: Array<{ role: string; content: string }>
+  messages: Array<{ role: string; content: string }>,
+  temperature = 0.3,
+  maxTokens = 4096
 ): Promise<string> {
   const body = {
     model,
@@ -568,20 +1356,130 @@ async function callOllama(
       ...messages,
     ],
     stream: false,
-    options: { temperature: 0.3, num_predict: 4096 },
+    options: { temperature, num_predict: maxTokens },
   };
 
-  const response = await fetch(`${baseUrl}/api/chat`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
+  let response: Response;
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 120_000); // 2 min timeout
+    response = await fetch(`${baseUrl}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+  } catch (err: any) {
+    if (err?.name === 'AbortError') {
+      throw new Error('Ollama nie odpowiedział w ciągu 2 minut. Model może być zbyt duży lub serwer jest przeciążony.');
+    }
+    if (err?.code === 'ECONNREFUSED' || err?.cause?.code === 'ECONNREFUSED') {
+      throw new Error(`Ollama nie jest uruchomiony na ${baseUrl}. Uruchom: ollama serve`);
+    }
+    throw new Error(`Nie można połączyć się z Ollama (${baseUrl}): ${err?.message ?? 'nieznany błąd'}`);
+  }
 
   if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Ollama error (${response.status}): ${errorText}`);
+    const errorText = await response.text().catch(() => '');
+    if (response.status === 404 && errorText.includes('not found')) {
+      throw new Error(`Model "${model}" nie znaleziony. Pobierz go: ollama pull ${model}`);
+    }
+    throw new Error(`Ollama zwróciło błąd (${response.status}): ${errorText.slice(0, 200)}`);
   }
 
   const data = await response.json() as { message?: { content?: string } };
   return data.message?.content ?? '';
+}
+
+// =============================================================================
+// DEADLINE REMINDERS
+// =============================================================================
+
+const DAY_MS = 86_400_000;
+const REMINDER_CHECK_MS = 300_000; // 5 minutes
+
+export interface DeadlineReminder {
+  deadlineId: string;
+  caseTitle: string;
+  deadlineTitle: string;
+  date: Date;
+  daysLeft: number;
+  overdue: boolean;
+  type: string;
+}
+
+/**
+ * Start periodic deadline reminder checks.
+ * Returns a cleanup function to stop the interval.
+ */
+export function startDeadlineReminders(
+  db: Database,
+  onReminder: (reminders: DeadlineReminder[]) => void
+): () => void {
+  const sentReminders = new Set<string>();
+
+  function check(): void {
+    // Cap sentinel growth — clear after 5000 entries (prevents unbounded memory)
+    if (sentReminders.size > 5000) sentReminders.clear();
+
+    try {
+      const allDeadlines = db.listDeadlines({ completed: false });
+      const nowMs = Date.now();
+      const pending: DeadlineReminder[] = [];
+
+      for (const deadline of allDeadlines) {
+        const dateMs = deadline.date.getTime();
+        const reminderMs = dateMs - (deadline.reminderDaysBefore * DAY_MS);
+        const daysLeft = Math.ceil((dateMs - nowMs) / DAY_MS);
+
+        // Overdue
+        if (dateMs < nowMs) {
+          const key = `${deadline.id}:overdue`;
+          if (sentReminders.has(key)) continue;
+          sentReminders.add(key);
+          const legalCase = db.getCase(deadline.caseId);
+          pending.push({
+            deadlineId: deadline.id,
+            caseTitle: legalCase?.title ?? deadline.caseId,
+            deadlineTitle: deadline.title,
+            date: deadline.date,
+            daysLeft,
+            overdue: true,
+            type: deadline.type,
+          });
+          continue;
+        }
+
+        // In reminder window
+        if (reminderMs <= nowMs && dateMs > nowMs) {
+          const key = `${deadline.id}:reminder`;
+          if (sentReminders.has(key)) continue;
+          sentReminders.add(key);
+          const legalCase = db.getCase(deadline.caseId);
+          pending.push({
+            deadlineId: deadline.id,
+            caseTitle: legalCase?.title ?? deadline.caseId,
+            deadlineTitle: deadline.title,
+            date: deadline.date,
+            daysLeft,
+            overdue: false,
+            type: deadline.type,
+          });
+        }
+      }
+
+      if (pending.length > 0) {
+        onReminder(pending);
+      }
+    } catch (err) {
+      logger.warn({ err }, 'Deadline reminder check failed');
+    }
+  }
+
+  // Run immediately on start, then every 5 minutes
+  check();
+  const interval = setInterval(check, REMINDER_CHECK_MS);
+
+  return () => clearInterval(interval);
 }

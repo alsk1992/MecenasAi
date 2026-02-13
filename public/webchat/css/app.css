@@ -267,242 +267,64 @@ body {
   display: flex;
 }
 .sidebar-tab-content > .session-list,
-.sidebar-tab-content > .project-list,
-.sidebar-tab-content > .artifact-list,
-.sidebar-tab-content > .code-list {
+.sidebar-tab-content > .cases-list,
+.sidebar-tab-content > .documents-list,
+.sidebar-tab-content > .deadlines-list {
   flex: 1;
   overflow-y: auto;
 }
-.sidebar-tab-content > .project-list::-webkit-scrollbar,
-.sidebar-tab-content > .artifact-list::-webkit-scrollbar,
-.sidebar-tab-content > .code-list::-webkit-scrollbar {
+.sidebar-tab-content > .cases-list::-webkit-scrollbar,
+.sidebar-tab-content > .documents-list::-webkit-scrollbar,
+.sidebar-tab-content > .deadlines-list::-webkit-scrollbar {
   width: 4px;
 }
-.sidebar-tab-content > .project-list::-webkit-scrollbar-track,
-.sidebar-tab-content > .artifact-list::-webkit-scrollbar-track,
-.sidebar-tab-content > .code-list::-webkit-scrollbar-track {
+.sidebar-tab-content > .cases-list::-webkit-scrollbar-track,
+.sidebar-tab-content > .documents-list::-webkit-scrollbar-track,
+.sidebar-tab-content > .deadlines-list::-webkit-scrollbar-track {
   background: transparent;
 }
-.sidebar-tab-content > .project-list::-webkit-scrollbar-thumb,
-.sidebar-tab-content > .artifact-list::-webkit-scrollbar-thumb,
-.sidebar-tab-content > .code-list::-webkit-scrollbar-thumb {
+.sidebar-tab-content > .cases-list::-webkit-scrollbar-thumb,
+.sidebar-tab-content > .documents-list::-webkit-scrollbar-thumb,
+.sidebar-tab-content > .deadlines-list::-webkit-scrollbar-thumb {
   background: var(--border);
   border-radius: 2px;
 }
 
-/* ── Tab Panel Header ── */
-.tab-panel-header {
-  padding: 8px 14px;
-  flex-shrink: 0;
+/* ── Case Items (Sprawy) ── */
+.case-item {
+  flex-wrap: wrap;
 }
-.tab-panel-action {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  padding: 7px 10px;
-  border: 1px dashed var(--border);
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-dim);
-  font-family: inherit;
-  font-size: 12px;
-  cursor: pointer;
-  transition: border-color 0.15s, color 0.15s, background 0.15s;
-}
-.tab-panel-action:hover {
-  border-color: var(--accent);
-  color: var(--accent-bright);
-  background: var(--accent-glow);
-}
-
-/* ── Project Items ── */
-.project-item {
-  padding: 0;
-}
-.project-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 14px;
-  cursor: pointer;
-  transition: background 0.1s;
-}
-.project-header:hover {
-  background: rgba(167, 139, 250, 0.08);
-}
-.project-chevron {
-  flex-shrink: 0;
-  transition: transform 0.15s;
-  color: var(--text-dim);
-}
-.project-item.expanded .project-chevron {
-  transform: rotate(90deg);
-}
-.project-icon {
-  flex-shrink: 0;
-  color: var(--text-dim);
-}
-.project-name {
-  flex: 1;
-  font-size: 13px;
-  color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.project-count {
+.case-sygnatura {
   font-size: 10px;
   color: var(--text-dim);
   background: rgba(255, 255, 255, 0.04);
   padding: 1px 6px;
-  border-radius: 8px;
-  flex-shrink: 0;
-}
-.project-delete {
-  display: none;
-  border: none;
-  background: transparent;
-  color: var(--text-dim);
-  font-size: 16px;
-  cursor: pointer;
-  padding: 0 4px;
-  line-height: 1;
-  flex-shrink: 0;
-}
-.project-header:hover .project-delete {
-  display: block;
-}
-.project-delete:hover {
-  color: var(--red);
-}
-.project-sessions {
-  display: none;
-  padding-left: 12px;
-}
-.project-item.expanded .project-sessions {
-  display: block;
-}
-.project-rename-input {
-  flex: 1;
-  min-width: 0;
-  padding: 2px 6px;
-  border: 1px solid var(--accent);
   border-radius: 4px;
-  background: var(--bg-primary);
-  color: var(--text-primary);
-  font-size: 13px;
-  font-family: inherit;
-  outline: none;
+  flex-shrink: 0;
+  font-family: 'SF Mono', 'Fira Code', monospace;
 }
 
-/* ── Artifact Items ── */
-.artifact-item {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 8px 14px;
-  cursor: pointer;
-  transition: background 0.1s;
+/* ── Document Items (Dokumenty) ── */
+.document-item {
+  flex-wrap: wrap;
+  gap: 6px;
 }
-.artifact-item:hover {
-  background: rgba(167, 139, 250, 0.08);
-}
-.artifact-type-icon {
-  flex-shrink: 0;
-  width: 28px;
-  height: 28px;
-  border-radius: 6px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin-top: 1px;
-}
-.artifact-type-icon.type-code {
-  background: rgba(59, 130, 246, 0.12);
-  color: var(--accent-bright);
-}
-.artifact-type-icon.type-table {
-  background: rgba(52, 211, 153, 0.12);
-  color: var(--green);
-}
-.artifact-type-icon.type-image {
-  background: rgba(245, 158, 11, 0.12);
-  color: var(--orange);
-}
-.artifact-info {
-  flex: 1;
-  min-width: 0;
-}
-.artifact-preview {
-  font-size: 12px;
-  color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  line-height: 1.4;
-}
-.artifact-source {
-  font-size: 11px;
-  color: var(--text-dim);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  margin-top: 2px;
-}
-
-/* ── Code List Items ── */
-.code-item {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 8px 14px;
-  cursor: pointer;
-  transition: background 0.1s;
-}
-.code-item:hover {
-  background: rgba(167, 139, 250, 0.08);
-}
-.code-lang-badge {
-  flex-shrink: 0;
-  padding: 2px 6px;
-  border-radius: 4px;
+.doc-type-badge {
   font-size: 10px;
-  font-weight: 600;
-  font-family: 'SF Mono', 'Fira Code', monospace;
-  text-transform: lowercase;
-  background: rgba(59, 130, 246, 0.12);
   color: var(--accent-bright);
-  margin-top: 2px;
+  background: rgba(59, 130, 246, 0.12);
+  padding: 1px 6px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  text-transform: capitalize;
 }
-.code-item-info {
-  flex: 1;
-  min-width: 0;
-}
-.code-item-preview {
-  font-size: 12px;
-  font-family: 'SF Mono', 'Fira Code', monospace;
-  color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  line-height: 1.4;
-}
-.code-item-source {
-  font-size: 11px;
-  color: var(--text-dim);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  margin-top: 2px;
-}
-.code-item-copy {
+.doc-export-btn {
   flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+  width: 22px;
+  height: 22px;
   border: none;
   border-radius: 4px;
   background: transparent;
@@ -510,17 +332,82 @@ body {
   cursor: pointer;
   opacity: 0;
   transition: opacity 0.15s, color 0.15s, background 0.15s;
-  margin-top: 1px;
 }
-.code-item:hover .code-item-copy {
+.document-item:hover .doc-export-btn {
   opacity: 1;
 }
-.code-item-copy:hover {
-  color: var(--text-primary);
-  background: rgba(255, 255, 255, 0.08);
-}
-.code-item-copy.copied {
+.doc-export-btn:hover {
   color: var(--green);
+  background: rgba(52, 211, 153, 0.12);
+}
+
+/* ── Deadline Items (Terminy) ── */
+.deadline-item {
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.deadline-date {
+  font-size: 10px;
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.04);
+  padding: 1px 6px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+.deadline-type-badge {
+  font-size: 10px;
+  color: var(--cyan);
+  background: rgba(34, 211, 238, 0.1);
+  padding: 1px 6px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  text-transform: capitalize;
+}
+.deadline-item.overdue .session-title {
+  color: var(--red);
+}
+.deadline-item.overdue .deadline-date {
+  color: var(--red);
+  background: rgba(248, 113, 113, 0.12);
+}
+
+/* ── Deadline Checkbox ── */
+.deadline-checkbox {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  accent-color: var(--green);
+  cursor: pointer;
+  margin-right: 2px;
+}
+
+/* ── Sidebar Error ── */
+.sidebar-error {
+  padding: 12px 14px;
+  font-size: 12px;
+  color: var(--red);
+  text-align: center;
+}
+
+/* ── Document Download Button (in chat) ── */
+.doc-download-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 6px 14px;
+  border-radius: var(--radius-xs);
+  background: rgba(52, 211, 153, 0.12);
+  color: var(--green);
+  font-size: 13px;
+  font-weight: 500;
+  text-decoration: none;
+  transition: background 0.15s, color 0.15s;
+  cursor: pointer;
+}
+.doc-download-btn:hover {
+  background: rgba(52, 211, 153, 0.22);
+  color: #5eead4;
 }
 
 /* ── Sidebar Profile Bar ── */
@@ -1804,4 +1691,58 @@ button:focus:not(:focus-visible),
 input:focus:not(:focus-visible),
 textarea:focus:not(:focus-visible) {
   outline: none;
+}
+
+/* ── Tab Action Bar (sidebar quick actions) ── */
+.tab-action-bar {
+  display: flex;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-subtle, rgba(255,255,255,0.06));
+}
+.tab-action-btn {
+  flex: 1;
+  background: var(--accent-primary, #6C63FF);
+  color: var(--text-primary, #fff);
+  border: none;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: opacity 0.15s;
+  white-space: nowrap;
+}
+.tab-action-btn:hover { opacity: 0.85; }
+
+/* ── Document Approve/Reject Buttons ── */
+.doc-action-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px 5px;
+  border-radius: 4px;
+  font-size: 0.7rem;
+  transition: background 0.15s;
+  flex-shrink: 0;
+}
+.doc-action-btn.approve {
+  color: var(--green, #2ecc71);
+}
+.doc-action-btn.approve:hover {
+  background: rgba(46, 204, 113, 0.15);
+}
+.doc-action-btn.reject {
+  color: var(--red, #e94560);
+}
+.doc-action-btn.reject:hover {
+  background: rgba(233, 69, 96, 0.15);
+}
+
+/* ── Reduced Motion ── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

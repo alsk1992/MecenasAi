@@ -1,5 +1,5 @@
 /**
- * Sidebar — tabs (chats, projects, artifacts, code), session list,
+ * Sidebar — tabs (chats, cases, documents, deadlines), session list,
  * search, profile popover
  */
 import { Storage } from './storage.js';
@@ -17,15 +17,16 @@ export class Sidebar {
     this.onSelect = null;
     this.onDelete = null;
     this.onRename = null;
-    this.onArtifactClick = null;
-    this.onCodeClick = null;
+    this.onCaseClick = null;
+    this.onDocumentClick = null;
+    this.onDeadlineClick = null;
+    this.onNewCase = null;
+    this.onNewDeadline = null;
 
-    // Projects data (localStorage)
-    this._projects = JSON.parse(Storage.get('webchat_projects') || '[]');
-    // Artifact/code cache keyed by sessionId
-    this._artifactCache = {};
-    this._allArtifacts = [];
-    this._allCode = [];
+    // Cached API data
+    this._cases = [];
+    this._documents = [];
+    this._deadlines = [];
 
     // Default expanded on desktop, collapsed on mobile
     const saved = Storage.get('sidebarExpanded');
@@ -58,12 +59,6 @@ export class Sidebar {
         }
       });
     });
-
-    // New project button
-    const newProjBtn = this.sidebarEl.querySelector('#new-project-btn');
-    if (newProjBtn) {
-      newProjBtn.addEventListener('click', () => this._createProject());
-    }
 
     // Profile popover toggle
     const profileBar = this.sidebarEl.querySelector('#sidebar-profile');
@@ -121,7 +116,7 @@ export class Sidebar {
     // Language select
     const langSelect = this.sidebarEl.querySelector('#language-select');
     if (langSelect) {
-      const savedLang = Storage.get('webchat_language') || 'en-US';
+      const savedLang = Storage.get('webchat_language') || 'pl-PL';
       langSelect.value = savedLang;
       langSelect.addEventListener('change', () => {
         Storage.set('webchat_language', langSelect.value);
@@ -129,12 +124,19 @@ export class Sidebar {
       });
     }
 
+    // Quick action buttons in tab headers
+    const newCaseBtn = this.sidebarEl.querySelector('#new-case-btn');
+    if (newCaseBtn) {
+      newCaseBtn.addEventListener('click', () => this.onNewCase?.());
+    }
+    const newDeadlineBtn = this.sidebarEl.querySelector('#new-deadline-btn');
+    if (newDeadlineBtn) {
+      newDeadlineBtn.addEventListener('click', () => this.onNewDeadline?.());
+    }
+
     // Context menu (right-click on sessions)
     this._contextMenu = null;
     document.addEventListener('click', () => this._hideContextMenu());
-    document.addEventListener('contextmenu', (e) => {
-      // Only prevent default for session items (handled in _renderSessions)
-    });
   }
 
   switchTab(tab) {
@@ -156,13 +158,18 @@ export class Sidebar {
     // Update search placeholder
     if (this.searchEl) {
       const placeholders = {
-        chats: 'Search chats...',
-        projects: 'Search projects...',
-        artifacts: 'Search artifacts...',
-        code: 'Search code...',
+        chats: 'Szukaj rozmów...',
+        cases: 'Szukaj spraw...',
+        documents: 'Szukaj dokumentów...',
+        deadlines: 'Szukaj terminów...',
       };
-      this.searchEl.placeholder = placeholders[tab] || 'Search...';
+      this.searchEl.placeholder = placeholders[tab] || 'Szukaj...';
     }
+
+    // Fetch data when switching to API-backed tabs
+    if (tab === 'cases') this._fetchCases();
+    else if (tab === 'documents') this._fetchDocuments();
+    else if (tab === 'deadlines') this._fetchDeadlines();
 
     this._renderActiveTab();
   }
@@ -171,9 +178,9 @@ export class Sidebar {
     const filter = this.searchEl?.value?.toLowerCase() || undefined;
     switch (this.activeTab) {
       case 'chats': this._renderSessions(filter); break;
-      case 'projects': this._renderProjects(filter); break;
-      case 'artifacts': this._renderArtifacts(filter); break;
-      case 'code': this._renderCode(filter); break;
+      case 'cases': this._renderCases(filter); break;
+      case 'documents': this._renderDocuments(filter); break;
+      case 'deadlines': this._renderDeadlines(filter); break;
     }
   }
 
@@ -205,11 +212,6 @@ export class Sidebar {
 
   removeSession(id) {
     this.sessions = this.sessions.filter(s => s.id !== id);
-    // Also remove from any projects
-    for (const p of this._projects) {
-      p.sessionIds = p.sessionIds.filter(sid => sid !== id);
-    }
-    this._saveProjects();
     this._renderWithCurrentFilter();
   }
 
@@ -240,92 +242,13 @@ export class Sidebar {
 
   get collapsed() { return !this._expanded; }
 
-  // ─── Feed session messages for artifact/code extraction ───
-  feedMessages(sessionId, messages) {
-    if (!messages?.length) return;
-    const session = this.sessions.find(s => s.id === sessionId);
-    const sessionTitle = session?.title || session?.lastMessage || 'Untitled';
-
-    const artifacts = [];
-    const codes = [];
-
-    for (let i = 0; i < messages.length; i++) {
-      const msg = messages[i];
-      if (msg.role !== 'assistant' && msg.role !== 'bot') continue;
-      const content = msg.content || '';
-
-      // Extract code blocks
-      const codeRegex = /```(\w*)\n([\s\S]*?)```/g;
-      let match;
-      while ((match = codeRegex.exec(content)) !== null) {
-        const lang = match[1] || '';
-        const code = match[2].trimEnd();
-        const firstLine = code.split('\n')[0].slice(0, 60);
-        const entry = {
-          type: 'code',
-          lang,
-          content: code,
-          preview: firstLine || '(empty)',
-          sessionId,
-          sessionTitle,
-          messageIndex: i,
-        };
-        codes.push(entry);
-        artifacts.push(entry);
-      }
-
-      // Extract tables (markdown tables)
-      const tableRegex = /(\|.+\|\n\|[-:\s|]+\|\n(?:\|.+\|\n?)+)/g;
-      while ((match = tableRegex.exec(content)) !== null) {
-        artifacts.push({
-          type: 'table',
-          content: match[1],
-          preview: match[1].split('\n')[0].slice(0, 60),
-          sessionId,
-          sessionTitle,
-          messageIndex: i,
-        });
-      }
-
-      // Extract images (markdown images)
-      const imgRegex = /!\[([^\]]*)\]\((https?:\/\/[^)]+)\)/g;
-      while ((match = imgRegex.exec(content)) !== null) {
-        artifacts.push({
-          type: 'image',
-          content: match[2],
-          preview: match[1] || match[2].split('/').pop().slice(0, 40),
-          sessionId,
-          sessionTitle,
-          messageIndex: i,
-        });
-      }
-    }
-
-    this._artifactCache[sessionId] = { artifacts, codes };
-    this._rebuildGlobalLists();
-  }
-
-  _rebuildGlobalLists() {
-    this._allArtifacts = [];
-    this._allCode = [];
-    for (const sessionId of Object.keys(this._artifactCache)) {
-      const cache = this._artifactCache[sessionId];
-      this._allArtifacts.push(...cache.artifacts);
-      this._allCode.push(...cache.codes);
-    }
-    // Re-render if on artifacts or code tab
-    if (this.activeTab === 'artifacts' || this.activeTab === 'code') {
-      this._renderActiveTab();
-    }
-  }
-
   // ─── Sessions (Chats tab) ───
 
   _startRename(item, titleSpan, session) {
     const input = document.createElement('input');
     input.type = 'text';
     input.className = 'session-rename-input';
-    input.value = session.title || session.lastMessage || 'New chat';
+    input.value = session.title || session.lastMessage || 'Nowa rozmowa';
     titleSpan.replaceWith(input);
     input.focus();
     input.select();
@@ -335,13 +258,13 @@ export class Sidebar {
       if (done) return;
       done = true;
       const newTitle = input.value.trim();
-      if (save && newTitle && newTitle !== (session.title || session.lastMessage || 'New chat')) {
+      if (save && newTitle && newTitle !== (session.title || session.lastMessage || 'Nowa rozmowa')) {
         session.title = newTitle;
         this.onRename?.(session.id, newTitle);
       }
       const newSpan = document.createElement('span');
       newSpan.className = 'session-title';
-      newSpan.textContent = session.title || session.lastMessage || 'New chat';
+      newSpan.textContent = session.title || session.lastMessage || 'Nowa rozmowa';
       input.replaceWith(newSpan);
       item.title = newSpan.textContent;
       newSpan.addEventListener('dblclick', (e) => {
@@ -366,14 +289,14 @@ export class Sidebar {
     const lastWeek = new Date(today.getTime() - 7 * 86400000);
 
     const groups = [
-      ['Today', []],
-      ['Yesterday', []],
-      ['Last 7 days', []],
-      ['Older', []],
+      ['Dzisiaj', []],
+      ['Wczoraj', []],
+      ['Ostatnie 7 dni', []],
+      ['Starsze', []],
     ];
 
     for (const s of this.sessions) {
-      const title = s.title || s.lastMessage || 'New chat';
+      const title = s.title || s.lastMessage || 'Nowa rozmowa';
       if (filter && !title.toLowerCase().includes(filter)) continue;
 
       const d = new Date(s.updatedAt);
@@ -399,7 +322,7 @@ export class Sidebar {
       group.appendChild(groupLabel);
 
       for (const s of items) {
-        const title = s.title || s.lastMessage || 'New chat';
+        const title = s.title || s.lastMessage || 'Nowa rozmowa';
         const isActive = s.id === this.activeSessionId;
 
         const item = document.createElement('div');
@@ -416,7 +339,7 @@ export class Sidebar {
         const delBtn = document.createElement('button');
         delBtn.className = 'session-delete';
         delBtn.dataset.id = s.id;
-        delBtn.title = 'Delete';
+        delBtn.title = 'Usuń';
         delBtn.innerHTML = '&times;';
         item.appendChild(delBtn);
 
@@ -435,10 +358,379 @@ export class Sidebar {
           this._startRename(item, titleSpan, s);
         });
 
-        // Right-click context menu for "Move to Project"
-        item.addEventListener('contextmenu', (e) => {
-          e.preventDefault();
-          this._showContextMenu(e.clientX, e.clientY, s.id);
+        group.appendChild(item);
+      }
+
+      frag.appendChild(group);
+    }
+
+    if (!hasItems) {
+      const empty = document.createElement('div');
+      empty.className = 'session-empty';
+      empty.textContent = filter ? `Brak wyników dla "${filter}"` : 'Brak rozmów';
+      frag.appendChild(empty);
+    }
+
+    const scrollTop = this.listEl.scrollTop;
+    this.listEl.innerHTML = '';
+    this.listEl.appendChild(frag);
+    this.listEl.scrollTop = scrollTop;
+  }
+
+  // ─── Context Menu ───
+
+  _hideContextMenu() {
+    if (this._contextMenu) {
+      this._contextMenu.remove();
+      this._contextMenu = null;
+    }
+  }
+
+  // ─── Cases (Sprawy tab) ───
+
+  async _fetchCases() {
+    try {
+      const r = await fetch('/api/cases');
+      if (!r.ok) {
+        this._showListError('cases-list', 'Nie udało się załadować spraw.');
+        return;
+      }
+      this._cases = await r.json();
+      this._renderActiveTab();
+    } catch {
+      this._showListError('cases-list', 'Brak połączenia z serwerem.');
+    }
+  }
+
+  _renderCases(filter) {
+    const listEl = this.sidebarEl.querySelector('.cases-list');
+    if (!listEl) return;
+
+    const frag = document.createDocumentFragment();
+    const filtered = filter
+      ? this._cases.filter(c =>
+          (c.title || '').toLowerCase().includes(filter) ||
+          (c.sygnatura || '').toLowerCase().includes(filter) ||
+          (c.court || '').toLowerCase().includes(filter))
+      : this._cases;
+
+    if (!filtered.length) {
+      const empty = document.createElement('div');
+      empty.className = 'session-empty';
+      empty.textContent = filter ? `Brak spraw dla "${filter}"` : 'Brak spraw. Napisz "Utwórz nową sprawę" w czacie.';
+      frag.appendChild(empty);
+      listEl.innerHTML = '';
+      listEl.appendChild(frag);
+      return;
+    }
+
+    // Group by status
+    const statusLabels = {
+      'nowa': 'Nowe',
+      'w_toku': 'W toku',
+      'zakonczona': 'Zakończone',
+      'zawieszona': 'Zawieszone',
+    };
+    const groups = {};
+    for (const c of filtered) {
+      const status = c.status || 'nowa';
+      if (!groups[status]) groups[status] = [];
+      groups[status].push(c);
+    }
+
+    const statusOrder = ['w_toku', 'nowa', 'zawieszona', 'zakonczona'];
+    for (const status of statusOrder) {
+      const items = groups[status];
+      if (!items?.length) continue;
+
+      const group = document.createElement('div');
+      group.className = 'session-group';
+
+      const label = document.createElement('div');
+      label.className = 'session-group-label';
+      label.textContent = statusLabels[status] || status;
+      group.appendChild(label);
+
+      for (const c of items) {
+        const item = document.createElement('div');
+        item.className = 'session-item case-item';
+        item.dataset.id = c.id;
+
+        const title = document.createElement('span');
+        title.className = 'session-title';
+        title.textContent = c.title;
+        item.appendChild(title);
+
+        if (c.sygnatura) {
+          const sig = document.createElement('span');
+          sig.className = 'case-sygnatura';
+          sig.textContent = c.sygnatura;
+          item.appendChild(sig);
+        }
+
+        item.addEventListener('click', () => {
+          this.onCaseClick?.(c);
+        });
+
+        group.appendChild(item);
+      }
+
+      frag.appendChild(group);
+    }
+
+    listEl.innerHTML = '';
+    listEl.appendChild(frag);
+  }
+
+  // ─── Documents (Dokumenty tab) ───
+
+  async _fetchDocuments() {
+    try {
+      const r = await fetch('/api/documents');
+      if (!r.ok) {
+        this._showListError('documents-list', 'Nie udało się załadować dokumentów.');
+        return;
+      }
+      this._documents = await r.json();
+      this._renderActiveTab();
+    } catch {
+      this._showListError('documents-list', 'Brak połączenia z serwerem.');
+    }
+  }
+
+  _renderDocuments(filter) {
+    const listEl = this.sidebarEl.querySelector('.documents-list');
+    if (!listEl) return;
+
+    const frag = document.createDocumentFragment();
+    const filtered = filter
+      ? this._documents.filter(d =>
+          (d.title || '').toLowerCase().includes(filter) ||
+          (d.type || '').toLowerCase().includes(filter))
+      : this._documents;
+
+    if (!filtered.length) {
+      const empty = document.createElement('div');
+      empty.className = 'session-empty';
+      empty.textContent = filter ? `Brak dokumentów dla "${filter}"` : 'Brak dokumentów. Napisz "Napisz pozew" w czacie.';
+      frag.appendChild(empty);
+      listEl.innerHTML = '';
+      listEl.appendChild(frag);
+      return;
+    }
+
+    // Group by status
+    const statusLabels = {
+      'szkic': 'Szkice',
+      'do_sprawdzenia': 'Do sprawdzenia',
+      'zatwierdzony': 'Zatwierdzone',
+      'zlozony': 'Złożone',
+    };
+    const statusIcons = {
+      'szkic': '\u270F\uFE0F',
+      'do_sprawdzenia': '\uD83D\uDD0D',
+      'zatwierdzony': '\u2705',
+      'zlozony': '\uD83D\uDCE4',
+    };
+    const groups = {};
+    for (const d of filtered) {
+      const status = d.status || 'szkic';
+      if (!groups[status]) groups[status] = [];
+      groups[status].push(d);
+    }
+
+    const statusOrder = ['do_sprawdzenia', 'szkic', 'zatwierdzony', 'zlozony'];
+    for (const status of statusOrder) {
+      const items = groups[status];
+      if (!items?.length) continue;
+
+      const group = document.createElement('div');
+      group.className = 'session-group';
+
+      const label = document.createElement('div');
+      label.className = 'session-group-label';
+      label.textContent = (statusIcons[status] || '') + ' ' + (statusLabels[status] || status);
+      group.appendChild(label);
+
+      for (const d of items) {
+        const item = document.createElement('div');
+        item.className = 'session-item document-item';
+        item.dataset.id = d.id;
+
+        const title = document.createElement('span');
+        title.className = 'session-title';
+        title.textContent = d.title;
+        item.appendChild(title);
+
+        const typeBadge = document.createElement('span');
+        typeBadge.className = 'doc-type-badge';
+        typeBadge.textContent = (d.type || 'pismo').replace(/_/g, ' ');
+        item.appendChild(typeBadge);
+
+        // Approve/Reject buttons for review docs
+        if (d.status === 'do_sprawdzenia') {
+          const approveBtn = document.createElement('button');
+          approveBtn.className = 'doc-action-btn approve';
+          approveBtn.title = 'Zatwierdź';
+          approveBtn.textContent = '\u2705';
+          approveBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this._approveDocument(d.id, item);
+          });
+          item.appendChild(approveBtn);
+
+          const rejectBtn = document.createElement('button');
+          rejectBtn.className = 'doc-action-btn reject';
+          rejectBtn.title = 'Odrzuć (wróć do szkicu)';
+          rejectBtn.textContent = '\u274C';
+          rejectBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this._rejectDocument(d.id, item);
+          });
+          item.appendChild(rejectBtn);
+        }
+
+        // Export button for approved/filed docs
+        if (d.status === 'zatwierdzony' || d.status === 'zlozony') {
+          const exportBtn = document.createElement('button');
+          exportBtn.className = 'doc-export-btn';
+          exportBtn.title = 'Pobierz DOCX';
+          exportBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
+          exportBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            window.open(`/api/documents/${d.id}/export`, '_blank');
+          });
+          item.appendChild(exportBtn);
+        }
+
+        item.addEventListener('click', () => {
+          this.onDocumentClick?.(d);
+        });
+
+        group.appendChild(item);
+      }
+
+      frag.appendChild(group);
+    }
+
+    listEl.innerHTML = '';
+    listEl.appendChild(frag);
+  }
+
+  // ─── Deadlines (Terminy tab) ───
+
+  async _fetchDeadlines() {
+    try {
+      const r = await fetch('/api/deadlines?upcoming=true');
+      if (!r.ok) {
+        this._showListError('deadlines-list', 'Nie udało się załadować terminów.');
+        return;
+      }
+      this._deadlines = await r.json();
+      this._renderActiveTab();
+    } catch {
+      this._showListError('deadlines-list', 'Brak połączenia z serwerem.');
+    }
+  }
+
+  _renderDeadlines(filter) {
+    const listEl = this.sidebarEl.querySelector('.deadlines-list');
+    if (!listEl) return;
+
+    const frag = document.createDocumentFragment();
+    const filtered = filter
+      ? this._deadlines.filter(d =>
+          (d.title || '').toLowerCase().includes(filter) ||
+          (d.type || '').toLowerCase().includes(filter))
+      : this._deadlines;
+
+    if (!filtered.length) {
+      const empty = document.createElement('div');
+      empty.className = 'session-empty';
+      empty.textContent = filter ? `Brak terminów dla "${filter}"` : 'Brak nadchodzących terminów. Dodaj termin przyciskiem powyżej lub poleceniem w czacie.';
+      frag.appendChild(empty);
+      listEl.innerHTML = '';
+      listEl.appendChild(frag);
+      return;
+    }
+
+    const now = Date.now();
+    const oneDay = 86400000;
+    const threeDays = 3 * oneDay;
+    const oneWeek = 7 * oneDay;
+
+    // Sort by date ascending
+    const sorted = [...filtered].sort((a, b) => a.date - b.date);
+
+    // Group by urgency
+    const groups = [
+      ['Zaległy', []],
+      ['Najbliższe 3 dni', []],
+      ['Ten tydzień', []],
+      ['Później', []],
+    ];
+
+    for (const d of sorted) {
+      if (d.completed) continue;
+      const diff = d.date - now;
+      if (diff < 0) groups[0][1].push(d);
+      else if (diff < threeDays) groups[1][1].push(d);
+      else if (diff < oneWeek) groups[2][1].push(d);
+      else groups[3][1].push(d);
+    }
+
+    let hasItems = false;
+    for (const [label, items] of groups) {
+      if (!items.length) continue;
+      hasItems = true;
+
+      const group = document.createElement('div');
+      group.className = 'session-group';
+
+      const groupLabel = document.createElement('div');
+      groupLabel.className = 'session-group-label';
+      groupLabel.textContent = label;
+      if (label === 'Zaległy') groupLabel.style.color = 'var(--red, #e94560)';
+      group.appendChild(groupLabel);
+
+      for (const d of items) {
+        const item = document.createElement('div');
+        item.className = 'session-item deadline-item';
+        if (label === 'Zaległy') item.classList.add('overdue');
+        item.dataset.id = d.id;
+
+        // Completion checkbox
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.className = 'deadline-checkbox';
+        checkbox.title = 'Oznacz jako zrealizowany';
+        checkbox.setAttribute('aria-label', 'Oznacz jako zrealizowany');
+        checkbox.addEventListener('click', (e) => {
+          e.stopPropagation();
+          this._completeDeadline(d.id, item);
+        });
+        item.appendChild(checkbox);
+
+        const title = document.createElement('span');
+        title.className = 'session-title';
+        title.textContent = d.title;
+        item.appendChild(title);
+
+        const dateStr = new Date(d.date).toLocaleDateString('pl-PL', {
+          day: 'numeric', month: 'short', year: 'numeric',
+        });
+        const dateBadge = document.createElement('span');
+        dateBadge.className = 'deadline-date';
+        dateBadge.textContent = dateStr;
+        item.appendChild(dateBadge);
+
+        const typeBadge = document.createElement('span');
+        typeBadge.className = 'deadline-type-badge';
+        typeBadge.textContent = d.type || 'procesowy';
+        item.appendChild(typeBadge);
+
+        item.addEventListener('click', () => {
+          this.onDeadlineClick?.(d);
         });
 
         group.appendChild(item);
@@ -450,382 +742,8 @@ export class Sidebar {
     if (!hasItems) {
       const empty = document.createElement('div');
       empty.className = 'session-empty';
-      empty.textContent = filter ? 'No results for "' + filter + '"' : 'No conversations yet';
+      empty.textContent = 'Brak nadchodzących terminów. Dodaj termin przyciskiem powyżej lub poleceniem w czacie.';
       frag.appendChild(empty);
-    }
-
-    const scrollTop = this.listEl.scrollTop;
-    this.listEl.innerHTML = '';
-    this.listEl.appendChild(frag);
-    this.listEl.scrollTop = scrollTop;
-  }
-
-  // ─── Context Menu (Move to Project) ───
-
-  _showContextMenu(x, y, sessionId) {
-    this._hideContextMenu();
-    if (!this._projects.length) return;
-
-    const menu = document.createElement('div');
-    menu.className = 'context-menu';
-    menu.style.left = x + 'px';
-    menu.style.top = y + 'px';
-
-    const header = document.createElement('div');
-    header.className = 'context-menu-item';
-    header.style.cssText = 'font-size:11px;color:var(--text-dim);cursor:default;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;';
-    header.textContent = 'Move to Project';
-    menu.appendChild(header);
-
-    const divider = document.createElement('div');
-    divider.className = 'context-menu-divider';
-    menu.appendChild(divider);
-
-    for (const p of this._projects) {
-      const item = document.createElement('div');
-      item.className = 'context-menu-item context-menu-sub';
-
-      // Folder icon
-      item.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>';
-
-      const label = document.createElement('span');
-      label.textContent = p.name;
-      item.appendChild(label);
-
-      const alreadyIn = p.sessionIds.includes(sessionId);
-      if (alreadyIn) {
-        const check = document.createElement('span');
-        check.style.cssText = 'margin-left:auto;color:var(--green);font-size:11px;';
-        check.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
-        item.appendChild(check);
-      }
-
-      item.addEventListener('click', () => {
-        if (alreadyIn) {
-          p.sessionIds = p.sessionIds.filter(id => id !== sessionId);
-        } else {
-          p.sessionIds.push(sessionId);
-        }
-        this._saveProjects();
-        this._hideContextMenu();
-      });
-
-      menu.appendChild(item);
-    }
-
-    document.body.appendChild(menu);
-    this._contextMenu = menu;
-
-    // Adjust if off screen
-    const rect = menu.getBoundingClientRect();
-    if (rect.right > window.innerWidth) {
-      menu.style.left = (window.innerWidth - rect.width - 8) + 'px';
-    }
-    if (rect.bottom > window.innerHeight) {
-      menu.style.top = (window.innerHeight - rect.height - 8) + 'px';
-    }
-  }
-
-  _hideContextMenu() {
-    if (this._contextMenu) {
-      this._contextMenu.remove();
-      this._contextMenu = null;
-    }
-  }
-
-  // ─── Projects ───
-
-  _saveProjects() {
-    Storage.set('webchat_projects', JSON.stringify(this._projects));
-  }
-
-  _createProject() {
-    const name = prompt('Project name:');
-    if (!name?.trim()) return;
-    const project = {
-      id: 'proj-' + Date.now(),
-      name: name.trim(),
-      sessionIds: [],
-    };
-    this._projects.push(project);
-    this._saveProjects();
-    this._renderActiveTab();
-  }
-
-  _deleteProject(projectId) {
-    if (!confirm('Delete this project? Chats will not be deleted.')) return;
-    this._projects = this._projects.filter(p => p.id !== projectId);
-    this._saveProjects();
-    this._renderActiveTab();
-  }
-
-  _renameProject(projectId) {
-    const project = this._projects.find(p => p.id === projectId);
-    if (!project) return;
-    const name = prompt('Rename project:', project.name);
-    if (!name?.trim()) return;
-    project.name = name.trim();
-    this._saveProjects();
-    this._renderActiveTab();
-  }
-
-  _renderProjects(filter) {
-    const listEl = this.sidebarEl.querySelector('.project-list');
-    if (!listEl) return;
-
-    const frag = document.createDocumentFragment();
-    const filtered = filter
-      ? this._projects.filter(p => p.name.toLowerCase().includes(filter))
-      : this._projects;
-
-    if (!filtered.length) {
-      const empty = document.createElement('div');
-      empty.className = 'session-empty';
-      empty.textContent = filter ? 'No projects match "' + filter + '"' : 'No projects yet';
-      frag.appendChild(empty);
-      listEl.innerHTML = '';
-      listEl.appendChild(frag);
-      return;
-    }
-
-    for (const project of filtered) {
-      const item = document.createElement('div');
-      item.className = 'project-item';
-      item.dataset.id = project.id;
-
-      const header = document.createElement('div');
-      header.className = 'project-header';
-
-      // Chevron
-      const chevron = document.createElement('span');
-      chevron.className = 'project-chevron';
-      chevron.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>';
-      header.appendChild(chevron);
-
-      // Folder icon
-      const icon = document.createElement('span');
-      icon.className = 'project-icon';
-      icon.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>';
-      header.appendChild(icon);
-
-      // Name
-      const name = document.createElement('span');
-      name.className = 'project-name';
-      name.textContent = project.name;
-      header.appendChild(name);
-
-      // Count badge
-      const count = document.createElement('span');
-      count.className = 'project-count';
-      count.textContent = project.sessionIds.length;
-      header.appendChild(count);
-
-      // Delete button
-      const delBtn = document.createElement('button');
-      delBtn.className = 'project-delete';
-      delBtn.innerHTML = '&times;';
-      delBtn.title = 'Delete project';
-      delBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        this._deleteProject(project.id);
-      });
-      header.appendChild(delBtn);
-
-      // Toggle expand
-      header.addEventListener('click', () => {
-        item.classList.toggle('expanded');
-      });
-
-      // Double-click to rename
-      name.addEventListener('dblclick', (e) => {
-        e.stopPropagation();
-        this._renameProject(project.id);
-      });
-
-      item.appendChild(header);
-
-      // Session list inside project
-      const sessionsDiv = document.createElement('div');
-      sessionsDiv.className = 'project-sessions';
-
-      for (const sid of project.sessionIds) {
-        const session = this.sessions.find(s => s.id === sid);
-        if (!session) continue;
-
-        const sessionItem = document.createElement('div');
-        sessionItem.className = 'session-item' + (sid === this.activeSessionId ? ' active' : '');
-        sessionItem.dataset.id = sid;
-
-        const title = document.createElement('span');
-        title.className = 'session-title';
-        title.textContent = session.title || session.lastMessage || 'New chat';
-        sessionItem.appendChild(title);
-
-        sessionItem.addEventListener('click', () => {
-          this.onSelect?.(sid);
-        });
-
-        sessionsDiv.appendChild(sessionItem);
-      }
-
-      if (!project.sessionIds.length) {
-        const empty = document.createElement('div');
-        empty.className = 'session-empty';
-        empty.style.padding = '8px 14px';
-        empty.textContent = 'No chats assigned';
-        sessionsDiv.appendChild(empty);
-      }
-
-      item.appendChild(sessionsDiv);
-      frag.appendChild(item);
-    }
-
-    listEl.innerHTML = '';
-    listEl.appendChild(frag);
-  }
-
-  // ─── Artifacts ───
-
-  _renderArtifacts(filter) {
-    const listEl = this.sidebarEl.querySelector('.artifact-list');
-    if (!listEl) return;
-
-    const frag = document.createDocumentFragment();
-    const filtered = filter
-      ? this._allArtifacts.filter(a => a.preview.toLowerCase().includes(filter) || a.sessionTitle.toLowerCase().includes(filter))
-      : this._allArtifacts;
-
-    if (!filtered.length) {
-      const empty = document.createElement('div');
-      empty.className = 'session-empty';
-      empty.textContent = filter ? 'No artifacts match "' + filter + '"' : 'No artifacts found yet. Send some messages with code, tables, or images.';
-      frag.appendChild(empty);
-      listEl.innerHTML = '';
-      listEl.appendChild(frag);
-      return;
-    }
-
-    for (const artifact of filtered) {
-      const item = document.createElement('div');
-      item.className = 'artifact-item';
-
-      // Type icon
-      const iconWrap = document.createElement('div');
-      iconWrap.className = 'artifact-type-icon type-' + artifact.type;
-      if (artifact.type === 'code') {
-        iconWrap.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>';
-      } else if (artifact.type === 'table') {
-        iconWrap.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="9" y1="3" x2="9" y2="21"/><line x1="15" y1="3" x2="15" y2="21"/></svg>';
-      } else if (artifact.type === 'image') {
-        iconWrap.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>';
-      }
-      item.appendChild(iconWrap);
-
-      // Info
-      const info = document.createElement('div');
-      info.className = 'artifact-info';
-
-      const preview = document.createElement('div');
-      preview.className = 'artifact-preview';
-      preview.textContent = artifact.preview;
-      info.appendChild(preview);
-
-      const source = document.createElement('div');
-      source.className = 'artifact-source';
-      source.textContent = artifact.sessionTitle;
-      if (artifact.lang) source.textContent += ' - ' + artifact.lang;
-      info.appendChild(source);
-
-      item.appendChild(info);
-
-      // Click to navigate
-      item.addEventListener('click', () => {
-        this.onArtifactClick?.(artifact.sessionId, artifact.messageIndex);
-      });
-
-      frag.appendChild(item);
-    }
-
-    listEl.innerHTML = '';
-    listEl.appendChild(frag);
-  }
-
-  // ─── Code ───
-
-  _renderCode(filter) {
-    const listEl = this.sidebarEl.querySelector('.code-list');
-    if (!listEl) return;
-
-    const frag = document.createDocumentFragment();
-    const filtered = filter
-      ? this._allCode.filter(c => c.preview.toLowerCase().includes(filter) || c.lang.toLowerCase().includes(filter) || c.sessionTitle.toLowerCase().includes(filter))
-      : this._allCode;
-
-    if (!filtered.length) {
-      const empty = document.createElement('div');
-      empty.className = 'session-empty';
-      empty.textContent = filter ? 'No code matches "' + filter + '"' : 'No code blocks found yet.';
-      frag.appendChild(empty);
-      listEl.innerHTML = '';
-      listEl.appendChild(frag);
-      return;
-    }
-
-    const copySvg = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';
-    const checkSvg = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
-
-    for (const code of filtered) {
-      const item = document.createElement('div');
-      item.className = 'code-item';
-
-      // Language badge
-      const badge = document.createElement('span');
-      badge.className = 'code-lang-badge';
-      badge.textContent = code.lang || 'txt';
-      item.appendChild(badge);
-
-      // Info
-      const info = document.createElement('div');
-      info.className = 'code-item-info';
-
-      const preview = document.createElement('div');
-      preview.className = 'code-item-preview';
-      preview.textContent = code.preview;
-      info.appendChild(preview);
-
-      const source = document.createElement('div');
-      source.className = 'code-item-source';
-      source.textContent = code.sessionTitle;
-      info.appendChild(source);
-
-      item.appendChild(info);
-
-      // Copy button
-      const copyBtn = document.createElement('button');
-      copyBtn.className = 'code-item-copy';
-      copyBtn.title = 'Copy code';
-      copyBtn.innerHTML = copySvg;
-      copyBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const text = code.content;
-        if (navigator.clipboard?.writeText) {
-          navigator.clipboard.writeText(text).catch(() => {});
-        }
-        copyBtn.innerHTML = checkSvg;
-        copyBtn.classList.add('copied');
-        setTimeout(() => {
-          copyBtn.innerHTML = copySvg;
-          copyBtn.classList.remove('copied');
-        }, 2000);
-      });
-      item.appendChild(copyBtn);
-
-      // Click to navigate
-      item.addEventListener('click', () => {
-        this.onCodeClick?.(code.sessionId, code.messageIndex);
-      });
-
-      frag.appendChild(item);
     }
 
     listEl.innerHTML = '';
@@ -840,7 +758,7 @@ export class Sidebar {
     panel.classList.add('visible');
 
     const body = panel.querySelector('#settings-body');
-    body.innerHTML = '<div class="settings-loading">Loading...</div>';
+    body.innerHTML = '<div class="settings-loading">Ładowanie...</div>';
 
     try {
       const token = Storage.get('webchat_token') || '';
@@ -851,7 +769,7 @@ export class Sidebar {
       const data = await r.json();
       this._renderSettings(data.schema);
     } catch (err) {
-      body.innerHTML = '<div class="settings-error">Failed to load settings. Check authentication.</div>';
+      body.innerHTML = '<div class="settings-error">Nie udało się załadować ustawień.</div>';
     }
   }
 
@@ -864,7 +782,7 @@ export class Sidebar {
     const saveBtn = this.sidebarEl.querySelector('#settings-save');
     if (saveBtn) {
       saveBtn.disabled = true;
-      saveBtn.textContent = 'Save Changes';
+      saveBtn.textContent = 'Zapisz zmiany';
     }
   }
 
@@ -906,7 +824,7 @@ export class Sidebar {
 
         const status = document.createElement('span');
         status.className = 'settings-field-status ' + (v.set ? 'set' : 'unset');
-        status.textContent = v.set ? 'Set' : 'Not set';
+        status.textContent = v.set ? 'Ustawiono' : 'Brak';
         header.appendChild(status);
         field.appendChild(header);
 
@@ -920,7 +838,7 @@ export class Sidebar {
           link.target = '_blank';
           link.rel = 'noopener';
           link.className = 'settings-help-link';
-          link.textContent = 'Get key';
+          link.textContent = 'Pobierz klucz';
           envName.appendChild(document.createTextNode(' '));
           envName.appendChild(link);
         }
@@ -930,7 +848,7 @@ export class Sidebar {
         const input = document.createElement('input');
         input.className = 'settings-input';
         input.type = v.secret ? 'password' : 'text';
-        input.placeholder = v.set ? v.masked : 'Not configured';
+        input.placeholder = v.set ? v.masked : 'Nie skonfigurowano';
         input.dataset.key = v.key;
         input.addEventListener('input', () => {
           const val = input.value.trim();
@@ -942,7 +860,7 @@ export class Sidebar {
           const saveBtn = this.sidebarEl.querySelector('#settings-save');
           if (saveBtn) {
             saveBtn.disabled = Object.keys(this._settingsDirty).length === 0;
-            saveBtn.textContent = 'Save Changes';
+            saveBtn.textContent = 'Zapisz zmiany';
           }
         });
         field.appendChild(input);
@@ -956,13 +874,69 @@ export class Sidebar {
     body.appendChild(frag);
   }
 
+  async _approveDocument(id, itemEl) {
+    try {
+      const r = await fetch(`/api/documents/${encodeURIComponent(id)}/approve`, { method: 'POST' });
+      if (!r.ok) {
+        this._showListError('documents-list', 'Nie udało się zatwierdzić dokumentu.');
+        return;
+      }
+      itemEl.style.opacity = '0.4';
+      setTimeout(() => this._fetchDocuments(), 600);
+    } catch {
+      this._showListError('documents-list', 'Brak połączenia z serwerem.');
+    }
+  }
+
+  async _rejectDocument(id, itemEl) {
+    try {
+      const r = await fetch(`/api/documents/${encodeURIComponent(id)}/reject`, { method: 'POST' });
+      if (!r.ok) {
+        this._showListError('documents-list', 'Nie udało się odrzucić dokumentu.');
+        return;
+      }
+      itemEl.style.opacity = '0.4';
+      setTimeout(() => this._fetchDocuments(), 600);
+    } catch {
+      this._showListError('documents-list', 'Brak połączenia z serwerem.');
+    }
+  }
+
+  async _completeDeadline(id, itemEl) {
+    try {
+      const r = await fetch(`/api/deadlines/${encodeURIComponent(id)}/complete`, { method: 'POST' });
+      if (!r.ok) {
+        this._showListError('deadlines-list', 'Nie udało się oznaczyć terminu.');
+        return;
+      }
+      // Animate removal
+      itemEl.style.opacity = '0.4';
+      itemEl.style.textDecoration = 'line-through';
+      setTimeout(() => {
+        this._fetchDeadlines();
+      }, 600);
+    } catch {
+      this._showListError('deadlines-list', 'Brak połączenia z serwerem.');
+    }
+  }
+
+  _showListError(listClass, message) {
+    const listEl = this.sidebarEl.querySelector(`.${listClass}`);
+    if (!listEl) return;
+    const err = document.createElement('div');
+    err.className = 'sidebar-error';
+    err.textContent = message;
+    listEl.innerHTML = '';
+    listEl.appendChild(err);
+  }
+
   async _saveSettings() {
     if (Object.keys(this._settingsDirty).length === 0) return;
 
     const saveBtn = this.sidebarEl.querySelector('#settings-save');
     if (saveBtn) {
       saveBtn.disabled = true;
-      saveBtn.textContent = 'Saving...';
+      saveBtn.textContent = 'Zapisywanie...';
     }
 
     try {
@@ -992,19 +966,19 @@ export class Sidebar {
       this._settingsDirty = {};
       await this._openSettings();
 
-      if (saveBtn) saveBtn.textContent = 'Saved!';
+      if (saveBtn) saveBtn.textContent = 'Zapisano!';
       setTimeout(() => {
         if (saveBtn) {
-          saveBtn.textContent = 'Save Changes';
+          saveBtn.textContent = 'Zapisz zmiany';
           saveBtn.disabled = true;
         }
       }, 2000);
     } catch (err) {
       if (saveBtn) {
-        saveBtn.textContent = 'Error - Try Again';
+        saveBtn.textContent = 'Błąd — spróbuj ponownie';
         saveBtn.disabled = false;
         setTimeout(() => {
-          if (saveBtn) saveBtn.textContent = 'Save Changes';
+          if (saveBtn) saveBtn.textContent = 'Zapisz zmiany';
         }, 3000);
       }
     }

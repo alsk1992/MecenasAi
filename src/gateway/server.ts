@@ -4,17 +4,22 @@
  */
 
 import * as http from 'http';
+import { timingSafeEqual } from 'crypto';
 import { WebSocketServer, WebSocket } from 'ws';
-import { join } from 'path';
+import { join, resolve, normalize } from 'path';
 import { existsSync, readFileSync } from 'fs';
-import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, Footer, PageNumber } from 'docx';
+import { Document, Packer, Paragraph, TextRun, AlignmentType, Footer, Header, PageNumber, SectionType } from 'docx';
 import { logger } from '../utils/logger.js';
+import { generateId } from '../utils/id.js';
 import type { Config, IncomingMessage } from '../types.js';
 import type { Database } from '../db/index.js';
 
 interface WebChatCallbacks {
   onWebChatMessage: (message: IncomingMessage) => Promise<void>;
+  onCancel?: (chatId: string) => boolean;
+  onSessionExpired?: (key: string) => void;
   setWebChatSend: (fn: (chatId: string, text: string) => void) => void;
+  setWebChatBroadcast: (fn: (text: string) => void) => void;
 }
 
 export interface HttpServer {
@@ -26,18 +31,89 @@ export function createServer(config: Config, db: Database): HttpServer {
   let server: http.Server | null = null;
   let wss: WebSocketServer | null = null;
   const clients = new Map<string, WebSocket>();
+  let sessionTtlTimer: NodeJS.Timeout | null = null;
+  let wsPingTimer: NodeJS.Timeout | null = null;
+
+  /** Constant-time string comparison to prevent timing attacks */
+  function safeCompare(a: string, b: string): boolean {
+    try {
+      const bufA = Buffer.from(a);
+      const bufB = Buffer.from(b);
+      // Pad shorter buffer so timingSafeEqual always runs (no length leak)
+      if (bufA.length !== bufB.length) {
+        const padded = Buffer.alloc(bufA.length);
+        bufB.copy(padded, 0, 0, Math.min(bufB.length, bufA.length));
+        return timingSafeEqual(bufA, padded) && bufA.length === bufB.length;
+      }
+      return timingSafeEqual(bufA, bufB);
+    } catch {
+      return false;
+    }
+  }
+
+  /** Check if a request has a valid auth token (for API endpoints) */
+  function checkApiAuth(req: http.IncomingMessage): boolean {
+    const authMode = config.gateway.auth ?? 'off';
+    if (authMode === 'off') return true;
+
+    const token = config.gateway.token;
+    if (!token) return true; // no token configured = open access
+
+    const authHeader = req.headers.authorization ?? '';
+    if (authHeader.startsWith('Bearer ')) {
+      return safeCompare(authHeader.slice(7), token);
+    }
+    // Also check query param for simple access
+    const url = new URL(req.url ?? '/', `http://${req.headers.host || 'localhost'}`);
+    return safeCompare(url.searchParams.get('token') ?? '', token);
+  }
+
+  /** Read JSON body from request with size limit and error handling */
+  function readJsonBody(req: http.IncomingMessage, res: http.ServerResponse, cb: (data: Record<string, unknown>) => void): void {
+    let body = '';
+    let size = 0;
+    const MAX = 1_048_576;
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > MAX) { req.destroy(); return; }
+      body += chunk;
+    });
+    req.on('error', () => {
+      if (!res.headersSent) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Błąd odczytu' })); }
+    });
+    req.on('end', () => {
+      if (res.headersSent) return;
+      let data: Record<string, unknown> = {};
+      if (body) {
+        try { data = JSON.parse(body); } catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Nieprawidłowy JSON' }));
+          return;
+        }
+      }
+      cb(data);
+    });
+  }
 
   return {
     async start(port, bind, callbacks) {
       server = http.createServer((req, res) => {
+        // Security headers
+        res.setHeader('X-Content-Type-Options', 'nosniff');
+        res.setHeader('X-Frame-Options', 'DENY');
+        res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+        res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; font-src 'self'");
+
         // CORS
         const corsOrigins = config.gateway.cors ?? ['*'];
         const origin = req.headers.origin ?? '';
-        if (corsOrigins.includes('*') || corsOrigins.includes(origin)) {
-          res.setHeader('Access-Control-Allow-Origin', origin || '*');
-          res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-          res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+        if (corsOrigins.includes('*')) {
+          res.setHeader('Access-Control-Allow-Origin', '*');
+        } else if (origin && corsOrigins.includes(origin)) {
+          res.setHeader('Access-Control-Allow-Origin', origin);
         }
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
         if (req.method === 'OPTIONS') {
           res.writeHead(204);
           res.end();
@@ -47,17 +123,113 @@ export function createServer(config: Config, db: Database): HttpServer {
         const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
         const pathname = url.pathname;
 
-        // Static files for WebChat
+        // Static files for WebChat — no auth required
         if (pathname.startsWith('/webchat')) {
           serveWebChat(req, res, pathname);
           return;
         }
 
-        // API routes
+        // Health — no auth required
         if (pathname === '/health' || pathname === '/api/health') {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ status: 'ok', service: 'mecenas', timestamp: new Date().toISOString() }));
+          let dbOk = false;
+          try { dbOk = !!db.raw().exec('SELECT 1'); } catch { /* db down */ }
+          const articleCount = dbOk ? db.countArticles() : 0;
+          const wsClients = wss?.clients?.size ?? 0;
+          const telegramConfigured = !!config.channels.telegram?.token;
+          const overall = dbOk ? 'ok' : 'degraded';
+          res.writeHead(overall === 'ok' ? 200 : 503, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            status: overall,
+            service: 'mecenas',
+            timestamp: new Date().toISOString(),
+            uptime: Math.floor(process.uptime()),
+            components: {
+              database: dbOk ? 'ok' : 'error',
+              knowledgeBase: articleCount > 0 ? `ok (${articleCount} artykułów)` : 'empty',
+              telegram: telegramConfigured ? 'configured' : 'not-configured',
+              websocket: `ok (${wsClients} połączeń)`,
+            },
+          }));
           return;
+        }
+
+        // Auth check for API routes
+        if (pathname.startsWith('/api/') && !checkApiAuth(req)) {
+          res.writeHead(401, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Brak autoryzacji. Podaj token w nagłówku Authorization: Bearer <token>.' }));
+          return;
+        }
+
+        // ===== CHAT SESSIONS API =====
+
+        // List sessions for user
+        if (pathname === '/api/chat/sessions' && req.method === 'GET') {
+          const userId = url.searchParams.get('userId') ?? '';
+          const sessions = db.listSessionsForUser(userId);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ sessions }));
+          return;
+        }
+
+        // Create new session
+        if (pathname === '/api/chat/sessions' && req.method === 'POST') {
+          readJsonBody(req, res, (data) => {
+            const userId = (data.userId as string) ?? `anon_${Date.now()}`;
+            const key = `webchat:${generateId('wc')}`;
+            db.upsertUser(userId);
+            db.upsertSession({
+              key,
+              userId,
+              channel: 'webchat',
+              chatId: key.replace('webchat:', ''),
+              messages: [],
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            });
+            res.writeHead(201, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ id: key, title: null }));
+          });
+          return;
+        }
+
+        // Get, Update, Delete single session
+        if (pathname.startsWith('/api/chat/sessions/') && pathname.split('/').length === 5) {
+          const sessionKey = decodeURIComponent(pathname.split('/')[4]);
+
+          if (req.method === 'GET') {
+            const session = db.getSession(sessionKey);
+            if (!session) {
+              res.writeHead(404, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Sesja nie znaleziona' }));
+              return;
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              id: session.key,
+              messages: session.messages,
+              title: (session.metadata as Record<string, unknown>)?.title ?? null,
+              updatedAt: session.updatedAt.getTime(),
+            }));
+            return;
+          }
+
+          if (req.method === 'PATCH') {
+            readJsonBody(req, res, (data) => {
+              if (data.title) {
+                db.updateSessionTitle(sessionKey, String(data.title));
+              }
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ success: true }));
+            });
+            return;
+          }
+
+          if (req.method === 'DELETE') {
+            db.deleteSession(sessionKey);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true }));
+            return;
+          }
         }
 
         // Documents API
@@ -97,8 +269,26 @@ export function createServer(config: Config, db: Database): HttpServer {
           const action = parts[4];
 
           let body = '';
-          req.on('data', (chunk) => { body += chunk; });
+          let bodySize = 0;
+          const MAX_BODY = 1_048_576; // 1 MB
+          req.on('data', (chunk) => {
+            bodySize += chunk.length;
+            if (bodySize > MAX_BODY) {
+              res.writeHead(413, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Zbyt duże żądanie' }));
+              req.destroy();
+              return;
+            }
+            body += chunk;
+          });
+          req.on('error', () => {
+            if (!res.headersSent) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Błąd odczytu żądania' }));
+            }
+          });
           req.on('end', () => {
+            if (res.headersSent) return;
             if (action === 'approve') {
               const doc = db.updateDocument(id, { status: 'zatwierdzony' });
               if (!doc) {
@@ -109,8 +299,15 @@ export function createServer(config: Config, db: Database): HttpServer {
               res.writeHead(200, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify(doc));
             } else if (action === 'reject') {
-              const data = body ? JSON.parse(body) : {};
-              const doc = db.updateDocument(id, { status: 'szkic', notes: data.notes });
+              let data: Record<string, unknown> = {};
+              if (body) {
+                try { data = JSON.parse(body); } catch {
+                  res.writeHead(400, { 'Content-Type': 'application/json' });
+                  res.end(JSON.stringify({ error: 'Nieprawidłowy JSON' }));
+                  return;
+                }
+              }
+              const doc = db.updateDocument(id, { status: 'szkic', notes: data.notes as string | undefined });
               if (!doc) {
                 res.writeHead(404, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ error: 'Dokument nie znaleziony' }));
@@ -123,6 +320,27 @@ export function createServer(config: Config, db: Database): HttpServer {
               res.end(JSON.stringify({ error: 'Nieznana akcja' }));
             }
           });
+          return;
+        }
+
+        // Document DELETE
+        if (pathname.startsWith('/api/documents/') && req.method === 'DELETE') {
+          const parts = pathname.split('/');
+          const id = parts[3];
+          const doc = db.getDocument(id);
+          if (!doc) {
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Dokument nie znaleziony' }));
+            return;
+          }
+          if (doc.status === 'zatwierdzony' || doc.status === 'zlozony') {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: `Nie można usunąć dokumentu o statusie "${doc.status}"` }));
+            return;
+          }
+          db.deleteDocument(id);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true }));
           return;
         }
 
@@ -154,21 +372,144 @@ export function createServer(config: Config, db: Database): HttpServer {
 
         // Cases API
         if (pathname === '/api/cases' && req.method === 'GET') {
-          const status = url.searchParams.get('status') ?? undefined;
-          const clientId = url.searchParams.get('clientId') ?? undefined;
-          const cases = db.listCases({ status, clientId });
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(cases));
+          const search = url.searchParams.get('search');
+          if (search) {
+            const cases = db.searchCases(search);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(cases));
+          } else {
+            const status = url.searchParams.get('status') ?? undefined;
+            const clientId = url.searchParams.get('clientId') ?? undefined;
+            const lawArea = url.searchParams.get('lawArea') ?? undefined;
+            const cases = db.listCases({ status, clientId, lawArea });
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(cases));
+          }
           return;
+        }
+        if (pathname === '/api/cases' && req.method === 'POST') {
+          readJsonBody(req, res, (data) => {
+            if (!data.clientId || !data.title) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'clientId i title są wymagane' }));
+              return;
+            }
+            const c = db.createCase({
+              clientId: data.clientId as string,
+              title: data.title as string,
+              lawArea: ((data.lawArea as string) ?? 'cywilne') as any,
+              status: 'nowa',
+              sygnatura: data.sygnatura as string | undefined,
+              court: data.court as string | undefined,
+              description: data.description as string | undefined,
+              opposingParty: data.opposingParty as string | undefined,
+              valueOfDispute: data.valueOfDispute as number | undefined,
+            });
+            res.writeHead(201, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(c));
+          });
+          return;
+        }
+        if (pathname.startsWith('/api/cases/') && pathname.split('/').length === 4) {
+          const caseId = decodeURIComponent(pathname.split('/')[3]);
+          if (req.method === 'GET') {
+            const c = db.getCase(caseId);
+            if (!c) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Sprawa nie znaleziona' })); return; }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(c));
+            return;
+          }
+          if (req.method === 'PATCH') {
+            readJsonBody(req, res, (data) => {
+              const updated = db.updateCase(caseId, data as any);
+              if (!updated) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Sprawa nie znaleziona' })); return; }
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify(updated));
+            });
+            return;
+          }
+          if (req.method === 'DELETE') {
+            if (!db.getCase(caseId)) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Sprawa nie znaleziona' })); return; }
+            db.deleteCase(caseId);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true }));
+            return;
+          }
         }
 
         // Deadlines API
         if (pathname === '/api/deadlines' && req.method === 'GET') {
           const upcoming = url.searchParams.get('upcoming') === 'true';
-          const deadlines = db.listDeadlines({ upcoming });
+          const caseId = url.searchParams.get('caseId') ?? undefined;
+          const deadlines = db.listDeadlines({ upcoming, caseId });
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(deadlines));
           return;
+        }
+        if (pathname === '/api/deadlines' && req.method === 'POST') {
+          readJsonBody(req, res, (data) => {
+            if (!data.caseId || !data.title || !data.date) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'caseId, title i date są wymagane' }));
+              return;
+            }
+            const parsedDate = new Date(data.date as string);
+            if (isNaN(parsedDate.getTime())) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Nieprawidłowy format daty' }));
+              return;
+            }
+            const dl = db.createDeadline({
+              caseId: data.caseId as string,
+              title: data.title as string,
+              date: parsedDate,
+              type: ((data.type as string) ?? 'procesowy') as any,
+              completed: false,
+              reminderDaysBefore: (data.reminderDaysBefore as number) ?? 3,
+            });
+            res.writeHead(201, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(dl));
+          });
+          return;
+        }
+        if (pathname.match(/^\/api\/deadlines\/[^/]+\/complete$/) && req.method === 'POST') {
+          const dlId = decodeURIComponent(pathname.split('/')[3]);
+          db.completeDeadline(dlId);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true }));
+          return;
+        }
+        // Individual deadline: GET, PATCH, DELETE
+        if (pathname.match(/^\/api\/deadlines\/[^/]+$/) && !pathname.endsWith('/complete')) {
+          const dlId = decodeURIComponent(pathname.split('/')[3]);
+          if (req.method === 'GET') {
+            const deadlines = db.listDeadlines({});
+            const dl = deadlines.find(d => d.id === dlId);
+            if (!dl) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Termin nie znaleziony' })); return; }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(dl));
+            return;
+          }
+          if (req.method === 'PATCH') {
+            readJsonBody(req, res, (data) => {
+              if (data.date) {
+                const d = new Date(data.date as string);
+                if (isNaN(d.getTime())) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Nieprawidłowy format daty' })); return; }
+                data.date = d;
+              }
+              const updated = db.updateDeadline(dlId, data as any);
+              if (!updated) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Termin nie znaleziony' })); return; }
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify(updated));
+            });
+            return;
+          }
+          if (req.method === 'DELETE') {
+            db.deleteDeadline(dlId);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true }));
+            return;
+          }
         }
 
         // Clients API
@@ -177,6 +518,84 @@ export function createServer(config: Config, db: Database): HttpServer {
           const clientList = q ? db.searchClients(q) : db.listClients();
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(clientList));
+          return;
+        }
+        if (pathname === '/api/clients' && req.method === 'POST') {
+          readJsonBody(req, res, (data) => {
+            if (!data.name || !data.type) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'name i type są wymagane' }));
+              return;
+            }
+            const client = db.createClient({
+              name: data.name as string,
+              type: data.type as any,
+              pesel: data.pesel as string | undefined,
+              nip: data.nip as string | undefined,
+              regon: data.regon as string | undefined,
+              krs: data.krs as string | undefined,
+              email: data.email as string | undefined,
+              phone: data.phone as string | undefined,
+              address: data.address as string | undefined,
+            });
+            res.writeHead(201, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(client));
+          });
+          return;
+        }
+        if (pathname.startsWith('/api/clients/') && pathname.split('/').length === 4) {
+          const clientId = decodeURIComponent(pathname.split('/')[3]);
+          if (req.method === 'GET') {
+            const client = db.getClient(clientId);
+            if (!client) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Klient nie znaleziony' })); return; }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(client));
+            return;
+          }
+          if (req.method === 'PATCH') {
+            readJsonBody(req, res, (data) => {
+              const updated = db.updateClient(clientId, data as any);
+              if (!updated) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Klient nie znaleziony' })); return; }
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify(updated));
+            });
+            return;
+          }
+          if (req.method === 'DELETE') {
+            if (!db.getClient(clientId)) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Klient nie znaleziony' })); return; }
+            db.deleteClient(clientId);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true }));
+            return;
+          }
+        }
+
+        // Time Entries API
+        if (pathname === '/api/time-entries' && req.method === 'GET') {
+          const teCaseId = url.searchParams.get('caseId');
+          if (!teCaseId) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'caseId jest wymagane' })); return; }
+          const entries = db.listTimeEntries(teCaseId);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(entries));
+          return;
+        }
+        if (pathname === '/api/time-entries' && req.method === 'POST') {
+          readJsonBody(req, res, (data) => {
+            if (!data.caseId || !data.description || !data.durationMinutes) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'caseId, description i durationMinutes są wymagane' }));
+              return;
+            }
+            const entry = db.createTimeEntry({
+              caseId: data.caseId as string,
+              description: data.description as string,
+              durationMinutes: data.durationMinutes as number,
+              hourlyRate: data.hourlyRate as number | undefined,
+              date: data.date ? new Date(data.date as string) : new Date(),
+            });
+            res.writeHead(201, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(entry));
+          });
           return;
         }
 
@@ -202,29 +621,183 @@ export function createServer(config: Config, db: Database): HttpServer {
           return;
         }
 
+        // Templates API
+        if (pathname === '/api/templates' && req.method === 'GET') {
+          const type = url.searchParams.get('type') ?? undefined;
+          const lawArea = url.searchParams.get('lawArea') ?? undefined;
+          const q = url.searchParams.get('q') ?? undefined;
+          const templates = db.listTemplates({ type, lawArea, query: q });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(templates));
+          return;
+        }
+        if (pathname === '/api/templates' && req.method === 'POST') {
+          readJsonBody(req, res, (data) => {
+            if (!data.name || !data.type || !data.content) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'name, type i content są wymagane' }));
+              return;
+            }
+            const tmpl = db.createTemplate({
+              name: data.name as string,
+              type: data.type as any,
+              content: data.content as string,
+              description: data.description as string | undefined,
+              lawArea: (data.lawArea as string | undefined) as any,
+              tags: Array.isArray(data.tags) ? (data.tags as string[]).join(',') : data.tags as string | undefined,
+            });
+            res.writeHead(201, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(tmpl));
+          });
+          return;
+        }
+        if (pathname.startsWith('/api/templates/') && pathname.split('/').length === 4) {
+          const tmplId = decodeURIComponent(pathname.split('/')[3]);
+          if (req.method === 'GET') {
+            const tmpl = db.getTemplate(tmplId);
+            if (!tmpl) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Szablon nie znaleziony' })); return; }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(tmpl));
+            return;
+          }
+          if (req.method === 'DELETE') {
+            db.deleteTemplate(tmplId);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true }));
+            return;
+          }
+        }
+
         // 404
         res.writeHead(404, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Not found' }));
       });
 
       // WebSocket for WebChat
-      wss = new WebSocketServer({ server, path: '/ws' });
+      const wssCorsOrigins = config.gateway.cors ?? ['*'];
+      wss = new WebSocketServer({
+        server,
+        path: '/ws',
+        verifyClient: (info: { req: http.IncomingMessage }) => {
+          if (wssCorsOrigins.includes('*')) return true;
+          const reqOrigin = info.req.headers.origin ?? '';
+          return wssCorsOrigins.includes(reqOrigin);
+        },
+      });
+
+      const wsRateLimit = config.http?.rateLimitPerMin ?? 60;
+      const webchatToken = config.channels.webchat?.token;
+      const requireAuth = !!webchatToken;
+
+      // Server-side ping to detect dead connections (every 30s)
+      const WS_PING_INTERVAL = 30_000;
+      const WS_PONG_TIMEOUT = 10_000;
+      const WS_MAX_MESSAGE_SIZE = 1_048_576; // 1 MB
+
+      wsPingTimer = setInterval(() => {
+        for (const [id, ws] of clients) {
+          if ((ws as any)._mecenasAlive === false) {
+            logger.info({ chatId: id }, 'Dead WebSocket connection removed');
+            clients.delete(id);
+            try { ws.terminate(); } catch {}
+            continue;
+          }
+          (ws as any)._mecenasAlive = false;
+          try { ws.ping(); } catch {}
+        }
+      }, WS_PING_INTERVAL);
 
       wss.on('connection', (ws) => {
-        const chatId = `webchat_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-        clients.set(chatId, ws);
+        const chatId = generateId('webchat');
+        let authenticated = !requireAuth; // auto-auth if no token configured
+        let msgCount = 0;
+        let rateLimitResetAt = Date.now() + 60_000;
+        (ws as any)._mecenasAlive = true;
 
-        logger.info({ chatId }, 'WebChat client connected');
+        ws.on('pong', () => { (ws as any)._mecenasAlive = true; });
 
-        ws.send(JSON.stringify({
-          type: 'connected',
-          chatId,
-          message: 'Witaj w Mecenasie! Jestem Twoim asystentem prawnym AI.',
-        }));
+        logger.info({ chatId, requireAuth }, 'WebChat client connected');
+
+        // If no auth required, immediately register and send authenticated
+        if (authenticated) {
+          clients.set(chatId, ws);
+          ws.send(JSON.stringify({
+            type: 'authenticated',
+            chatId,
+            message: 'Witaj w Mecenasie! Jestem Twoim asystentem prawnym AI.',
+          }));
+        }
 
         ws.on('message', async (data) => {
           try {
-            const msg = JSON.parse(data.toString());
+            const raw = data.toString();
+            if (raw.length > WS_MAX_MESSAGE_SIZE) {
+              ws.send(JSON.stringify({ type: 'error', message: 'Wiadomość za duża (maks. 1 MB).' }));
+              return;
+            }
+            const msg = JSON.parse(raw);
+
+            // Auth handshake
+            if (msg.type === 'auth') {
+              if (requireAuth && !safeCompare(String(msg.token ?? ''), webchatToken ?? '')) {
+                ws.send(JSON.stringify({ type: 'error', message: 'Invalid token' }));
+                ws.close(4001, 'Invalid token');
+                return;
+              }
+              if (!authenticated) {
+                authenticated = true;
+                clients.set(chatId, ws);
+                ws.send(JSON.stringify({
+                  type: 'authenticated',
+                  chatId,
+                  message: 'Witaj w Mecenasie! Jestem Twoim asystentem prawnym AI.',
+                }));
+              }
+              return;
+            }
+
+            // Ignore pings (keep-alive)
+            if (msg.type === 'ping') {
+              ws.send(JSON.stringify({ type: 'pong' }));
+              return;
+            }
+
+            // Reject unauthenticated messages
+            if (!authenticated) {
+              ws.send(JSON.stringify({ type: 'error', message: 'Not authenticated. Send auth first.' }));
+              return;
+            }
+
+            // Rate limiting
+            const now = Date.now();
+            if (now > rateLimitResetAt) {
+              msgCount = 0;
+              rateLimitResetAt = now + 60_000;
+            }
+            msgCount++;
+            if (msgCount > wsRateLimit) {
+              ws.send(JSON.stringify({ type: 'error', message: 'Zbyt wiele wiadomości. Odczekaj chwilę.' }));
+              return;
+            }
+
+            // Session switch
+            if (msg.type === 'switch') {
+              const switchId = String(msg.sessionId ?? '').trim();
+              if (!switchId) {
+                ws.send(JSON.stringify({ type: 'error', message: 'Brak sessionId.' }));
+                return;
+              }
+              ws.send(JSON.stringify({ type: 'switched', sessionId: switchId }));
+              return;
+            }
+
+            // Cancel current request
+            if (msg.type === 'cancel') {
+              const cancelled = callbacks.onCancel?.(chatId) ?? false;
+              ws.send(JSON.stringify({ type: 'cancelled', success: cancelled }));
+              return;
+            }
+
             if (msg.type === 'message' && msg.text) {
               await callbacks.onWebChatMessage({
                 id: `wc_${Date.now()}`,
@@ -258,6 +831,36 @@ export function createServer(config: Config, db: Database): HttpServer {
         }
       });
 
+      callbacks.setWebChatBroadcast((text: string) => {
+        const msg = JSON.stringify({ type: 'reminder', text });
+        for (const [, ws] of clients) {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(msg);
+          }
+        }
+      });
+
+      // Session TTL enforcement — clean up expired sessions every hour
+      const ttlMs = config.session?.ttlMs ?? 24 * 60 * 60 * 1000;
+      sessionTtlTimer = setInterval(() => {
+        try {
+          const cutoff = Date.now() - ttlMs;
+          const expired = db.raw().exec(
+            'SELECT key FROM sessions WHERE updated_at < ?', [cutoff]
+          );
+          if (expired.length && expired[0].values.length) {
+            for (const row of expired[0].values) {
+              const sessionKey = row[0] as string;
+              db.deleteSession(sessionKey);
+              callbacks.onSessionExpired?.(sessionKey);
+            }
+            logger.info({ count: expired[0].values.length }, 'Expired sessions cleaned up');
+          }
+        } catch (err) {
+          logger.warn({ err }, 'Session TTL cleanup failed');
+        }
+      }, 3_600_000); // every hour
+
       const host = bind === 'all' ? '0.0.0.0' : '127.0.0.1';
       return new Promise<void>((resolve, reject) => {
         server!.on('error', reject);
@@ -269,6 +872,8 @@ export function createServer(config: Config, db: Database): HttpServer {
     },
 
     async stop() {
+      if (sessionTtlTimer) { clearInterval(sessionTtlTimer); sessionTtlTimer = null; }
+      if (wsPingTimer) { clearInterval(wsPingTimer); wsPingTimer = null; }
       for (const [, ws] of clients) {
         try { ws.close(); } catch {}
       }
@@ -288,12 +893,20 @@ export function createServer(config: Config, db: Database): HttpServer {
 }
 
 function serveWebChat(_req: http.IncomingMessage, res: http.ServerResponse, pathname: string): void {
+  const webchatRoot = resolve(process.cwd(), 'public', 'webchat');
   let filePath: string;
   if (pathname === '/webchat' || pathname === '/webchat/') {
-    filePath = join(process.cwd(), 'public', 'webchat', 'index.html');
+    filePath = join(webchatRoot, 'index.html');
   } else {
-    const relative = pathname.replace('/webchat/', '');
-    filePath = join(process.cwd(), 'public', 'webchat', relative);
+    const relative = normalize(pathname.replace('/webchat/', '')).replace(/^(\.\.(\/|\\))+/, '');
+    filePath = resolve(webchatRoot, relative);
+  }
+
+  // Prevent path traversal — resolved path must be within webchatRoot
+  if (!filePath.startsWith(webchatRoot)) {
+    res.writeHead(403, { 'Content-Type': 'text/plain' });
+    res.end('Forbidden');
+    return;
   }
 
   if (!existsSync(filePath)) {
@@ -313,98 +926,303 @@ function serveWebChat(_req: http.IncomingMessage, res: http.ServerResponse, path
   res.end(content);
 }
 
+/** Polish date formatter */
+function plDate(date: Date): string {
+  return date.toLocaleDateString('pl-PL', { year: 'numeric', month: 'long', day: 'numeric' });
+}
+
+/** Standard paragraph style for court documents: Times New Roman 12pt, 1.5 line spacing */
+const COURT_FONT = 'Times New Roman';
+const COURT_SIZE = 24; // half-points (24 = 12pt)
+const COURT_LINE_SPACING = 360; // 1.5 spacing in twips (240 * 1.5)
+
+/**
+ * Parse inline markdown (**bold**, *italic*, ***bold+italic***) into TextRun array.
+ * Handles nested formatting. Falls back to plain text on parse issues.
+ */
+function parseInlineMarkdown(text: string): TextRun[] {
+  const runs: TextRun[] = [];
+  // Regex to match ***bold+italic***, **bold**, *italic* (non-greedy)
+  const re = /(\*{1,3})((?:(?!\1).)+?)\1/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = re.exec(text)) !== null) {
+    // Text before the match
+    if (match.index > lastIndex) {
+      runs.push(new TextRun({ text: text.slice(lastIndex, match.index), font: COURT_FONT, size: COURT_SIZE }));
+    }
+    const stars = match[1].length;
+    const inner = match[2];
+    runs.push(new TextRun({
+      text: inner,
+      font: COURT_FONT,
+      size: COURT_SIZE,
+      bold: stars >= 2,
+      italics: stars === 1 || stars === 3,
+    }));
+    lastIndex = match.index + match[0].length;
+  }
+
+  // Remaining text after last match (or the entire string if no matches)
+  if (lastIndex < text.length) {
+    runs.push(new TextRun({ text: text.slice(lastIndex), font: COURT_FONT, size: COURT_SIZE }));
+  }
+
+  return runs.length > 0 ? runs : [new TextRun({ text, font: COURT_FONT, size: COURT_SIZE })];
+}
+
 async function generateDocx(doc: { title: string; content: string; type: string; status: string; caseId?: string }, db: Database): Promise<Buffer> {
-  // Build paragraphs from content
+  const legalCase = doc.caseId ? db.getCase(doc.caseId) : null;
+  const client = legalCase ? db.getClient(legalCase.clientId) : null;
+  const isDraft = doc.status === 'szkic' || doc.status === 'do_sprawdzenia';
   const lines = doc.content.split('\n');
-  const children: Paragraph[] = [];
 
-  // Title
-  children.push(new Paragraph({
-    text: doc.title,
-    heading: HeadingLevel.HEADING_1,
-    alignment: AlignmentType.CENTER,
-    spacing: { after: 400 },
-  }));
+  // ===== TITLE PAGE (for formal court documents) =====
+  const formalTypes = ['pozew', 'odpowiedz_na_pozew', 'apelacja', 'wezwanie_do_zaplaty', 'wniosek', 'pismo_procesowe'];
+  const hasTitlePage = formalTypes.includes(doc.type) && legalCase;
 
-  // Case info if linked
-  if (doc.caseId) {
-    const legalCase = db.getCase(doc.caseId);
-    if (legalCase) {
-      const caseInfo = [
-        legalCase.sygnatura ? `Sygnatura: ${legalCase.sygnatura}` : null,
-        legalCase.court ? `Sąd: ${legalCase.court}` : null,
-      ].filter(Boolean).join(' | ');
-      if (caseInfo) {
-        children.push(new Paragraph({
-          children: [new TextRun({ text: caseInfo, italics: true, size: 20 })],
-          alignment: AlignmentType.CENTER,
-          spacing: { after: 200 },
-        }));
-      }
+  const titlePageChildren: Paragraph[] = [];
+
+  if (hasTitlePage && legalCase) {
+    // Top: Court name
+    if (legalCase.court) {
+      titlePageChildren.push(new Paragraph({
+        children: [new TextRun({ text: legalCase.court, font: COURT_FONT, size: 28, bold: true })],
+        alignment: AlignmentType.CENTER,
+        spacing: { after: 100 },
+      }));
+    }
+    if (legalCase.sygnatura) {
+      titlePageChildren.push(new Paragraph({
+        children: [new TextRun({ text: `Sygn. akt: ${legalCase.sygnatura}`, font: COURT_FONT, size: COURT_SIZE, italics: true })],
+        alignment: AlignmentType.CENTER,
+        spacing: { after: 400 },
+      }));
+    }
+
+    // Spacer
+    for (let i = 0; i < 6; i++) titlePageChildren.push(new Paragraph({ text: '' }));
+
+    // Document type + title
+    const typeLabels: Record<string, string> = {
+      pozew: 'POZEW', odpowiedz_na_pozew: 'ODPOWIEDZ NA POZEW', apelacja: 'APELACJA',
+      wezwanie_do_zaplaty: 'WEZWANIE DO ZAPLATY', wniosek: 'WNIOSEK', pismo_procesowe: 'PISMO PROCESOWE',
+    };
+    titlePageChildren.push(new Paragraph({
+      children: [new TextRun({ text: typeLabels[doc.type] ?? doc.type.toUpperCase(), font: COURT_FONT, size: 36, bold: true })],
+      alignment: AlignmentType.CENTER,
+      spacing: { after: 200 },
+    }));
+    titlePageChildren.push(new Paragraph({
+      children: [new TextRun({ text: doc.title, font: COURT_FONT, size: 28 })],
+      alignment: AlignmentType.CENTER,
+      spacing: { after: 400 },
+    }));
+
+    // Spacer
+    for (let i = 0; i < 4; i++) titlePageChildren.push(new Paragraph({ text: '' }));
+
+    // Case details
+    if (client) {
+      titlePageChildren.push(new Paragraph({
+        children: [new TextRun({ text: `Klient: ${client.name}`, font: COURT_FONT, size: COURT_SIZE })],
+        alignment: AlignmentType.CENTER,
+      }));
+    }
+    titlePageChildren.push(new Paragraph({
+      children: [new TextRun({ text: `Dziedzina: ${legalCase.lawArea}`, font: COURT_FONT, size: COURT_SIZE })],
+      alignment: AlignmentType.CENTER,
+    }));
+    if (legalCase.valueOfDispute) {
+      titlePageChildren.push(new Paragraph({
+        children: [new TextRun({ text: `WPS: ${legalCase.valueOfDispute.toLocaleString('pl-PL')} PLN`, font: COURT_FONT, size: COURT_SIZE })],
+        alignment: AlignmentType.CENTER,
+      }));
+    }
+
+    // Spacer
+    for (let i = 0; i < 6; i++) titlePageChildren.push(new Paragraph({ text: '' }));
+
+    // Date
+    titlePageChildren.push(new Paragraph({
+      children: [new TextRun({ text: plDate(new Date()), font: COURT_FONT, size: COURT_SIZE })],
+      alignment: AlignmentType.CENTER,
+    }));
+
+    // Draft watermark on title page
+    if (isDraft) {
+      titlePageChildren.push(new Paragraph({ text: '', spacing: { before: 400 } }));
+      titlePageChildren.push(new Paragraph({
+        children: [new TextRun({ text: 'PROJEKT — wymaga weryfikacji prawnika', font: COURT_FONT, size: 28, bold: true, color: 'FF0000' })],
+        alignment: AlignmentType.CENTER,
+      }));
     }
   }
 
-  // Separator
-  children.push(new Paragraph({ text: '', spacing: { after: 200 } }));
+  // ===== CONTENT SECTION =====
+  const contentChildren: Paragraph[] = [];
 
-  // Content
+  // Document title (on content page)
+  contentChildren.push(new Paragraph({
+    children: [new TextRun({ text: doc.title, font: COURT_FONT, size: 28, bold: true })],
+    alignment: AlignmentType.CENTER,
+    spacing: { after: 300 },
+  }));
+
+  // Case info subtitle
+  if (legalCase) {
+    const infoParts = [
+      legalCase.sygnatura ? `Sygn. akt: ${legalCase.sygnatura}` : null,
+      legalCase.court ?? null,
+    ].filter(Boolean);
+    if (infoParts.length) {
+      contentChildren.push(new Paragraph({
+        children: [new TextRun({ text: infoParts.join(' | '), font: COURT_FONT, size: 20, italics: true })],
+        alignment: AlignmentType.CENTER,
+        spacing: { after: 200 },
+      }));
+    }
+  }
+
+  // Separator line
+  contentChildren.push(new Paragraph({ text: '', spacing: { after: 200 } }));
+
+  // Content paragraphs (with markdown support)
   for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed) {
-      children.push(new Paragraph({ text: '' }));
+      contentChildren.push(new Paragraph({ text: '', spacing: { after: 80 } }));
       continue;
     }
 
-    // Section headers (uppercase or starting with Roman numerals)
-    if (/^(I{1,3}V?|V|VI{0,3}|IX|X{0,3})\.\s/.test(trimmed) || trimmed === trimmed.toUpperCase() && trimmed.length > 3) {
-      children.push(new Paragraph({
-        text: trimmed,
-        heading: HeadingLevel.HEADING_2,
-        spacing: { before: 200, after: 100 },
+    // Markdown headings: ## Heading → bold, larger
+    const headingMatch = trimmed.match(/^(#{1,4})\s+(.+)$/);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      const headingSize = level === 1 ? 32 : level === 2 ? 28 : 24;
+      contentChildren.push(new Paragraph({
+        children: [new TextRun({ text: headingMatch[2], font: COURT_FONT, size: headingSize, bold: true })],
+        spacing: { before: level <= 2 ? 300 : 240, after: 120 },
       }));
       continue;
     }
 
-    children.push(new Paragraph({
-      children: [new TextRun({ text: trimmed, size: 24, font: 'Times New Roman' })],
-      spacing: { after: 80, line: 360 },
+    // Section headers: Roman numerals or ALL CAPS lines > 3 chars
+    if (/^(I{1,3}V?|V|VI{0,3}|IX|X{0,3})\.\s/.test(trimmed) || (trimmed === trimmed.toUpperCase() && trimmed.length > 3 && !/^\d/.test(trimmed))) {
+      contentChildren.push(new Paragraph({
+        children: [new TextRun({ text: trimmed, font: COURT_FONT, size: COURT_SIZE, bold: true })],
+        spacing: { before: 240, after: 120 },
+      }));
+      continue;
+    }
+
+    // Bullet lists: - item or * item
+    const bulletMatch = trimmed.match(/^[-*]\s+(.+)$/);
+    if (bulletMatch) {
+      contentChildren.push(new Paragraph({
+        children: parseInlineMarkdown(bulletMatch[1]),
+        spacing: { after: 60, line: COURT_LINE_SPACING },
+        indent: { left: 360 },
+        bullet: { level: 0 },
+      }));
+      continue;
+    }
+
+    // Numbered items (1. 2. etc.)
+    if (/^\d+[\.\)]\s/.test(trimmed)) {
+      const numContent = trimmed.replace(/^\d+[\.\)]\s+/, '');
+      contentChildren.push(new Paragraph({
+        children: parseInlineMarkdown(numContent.length ? numContent : trimmed),
+        spacing: { after: 80, line: COURT_LINE_SPACING },
+        indent: { left: 360 },
+      }));
+      continue;
+    }
+
+    contentChildren.push(new Paragraph({
+      children: parseInlineMarkdown(trimmed),
+      spacing: { after: 80, line: COURT_LINE_SPACING },
     }));
   }
 
-  // Draft watermark
-  if (doc.status === 'szkic' || doc.status === 'do_sprawdzenia') {
-    children.push(new Paragraph({ text: '', spacing: { before: 400 } }));
-    children.push(new Paragraph({
-      children: [new TextRun({
-        text: 'PROJEKT — wymaga weryfikacji prawnika',
-        bold: true, italics: true, size: 20, color: 'FF0000',
-      })],
+  // ===== SIGNATURE BLOCK =====
+  contentChildren.push(new Paragraph({ text: '', spacing: { before: 600 } }));
+  contentChildren.push(new Paragraph({ text: '', spacing: { before: 200 } }));
+
+  // Right-aligned signature area
+  contentChildren.push(new Paragraph({
+    children: [new TextRun({ text: '____________________________', font: COURT_FONT, size: COURT_SIZE })],
+    alignment: AlignmentType.RIGHT,
+    spacing: { after: 40 },
+  }));
+  contentChildren.push(new Paragraph({
+    children: [new TextRun({ text: '(podpis)', font: COURT_FONT, size: 18, italics: true, color: '666666' })],
+    alignment: AlignmentType.RIGHT,
+    spacing: { after: 40 },
+  }));
+
+  // Draft watermark (in content section for non-title-page docs)
+  if (isDraft && !hasTitlePage) {
+    contentChildren.push(new Paragraph({ text: '', spacing: { before: 400 } }));
+    contentChildren.push(new Paragraph({
+      children: [new TextRun({ text: 'PROJEKT — wymaga weryfikacji prawnika', font: COURT_FONT, size: 20, bold: true, italics: true, color: 'FF0000' })],
       alignment: AlignmentType.CENTER,
     }));
   }
 
-  const document = new Document({
-    sections: [{
+  // ===== BUILD HEADER =====
+  const headerChildren: Paragraph[] = [];
+  if (legalCase?.sygnatura) {
+    headerChildren.push(new Paragraph({
+      children: [
+        new TextRun({ text: `Sygn. akt: ${legalCase.sygnatura}`, font: COURT_FONT, size: 16, color: '999999' }),
+      ],
+      alignment: AlignmentType.RIGHT,
+    }));
+  }
+
+  // ===== ASSEMBLE DOCUMENT =====
+  const sections = [];
+
+  // Title page section (if applicable)
+  if (hasTitlePage && titlePageChildren.length) {
+    sections.push({
       properties: {
         page: {
           margin: { top: 1440, right: 1440, bottom: 1440, left: 1440 },
         },
       },
-      children,
-      footers: {
-        default: new Footer({
-          children: [new Paragraph({
-            alignment: AlignmentType.CENTER,
-            children: [
-              new TextRun({ text: 'Mecenas — Asystent Prawny AI | Strona ', size: 16, color: '999999' }),
-              new TextRun({ children: [PageNumber.CURRENT], size: 16, color: '999999' }),
-            ],
-          })],
-        }),
+      children: titlePageChildren,
+    });
+  }
+
+  // Main content section
+  sections.push({
+    properties: {
+      ...(hasTitlePage ? { type: SectionType.NEXT_PAGE } : {}),
+      page: {
+        margin: { top: 1440, right: 1440, bottom: 1440, left: 1440 },
       },
-    }],
+    },
+    headers: headerChildren.length ? {
+      default: new Header({ children: headerChildren }),
+    } : undefined,
+    children: contentChildren,
+    footers: {
+      default: new Footer({
+        children: [new Paragraph({
+          alignment: AlignmentType.CENTER,
+          children: [
+            new TextRun({ text: 'Mecenas — Asystent Prawny AI | Strona ', font: COURT_FONT, size: 16, color: '999999' }),
+            new TextRun({ children: [PageNumber.CURRENT], size: 16, color: '999999' }),
+          ],
+        })],
+      }),
+    },
   });
 
+  const document = new Document({ sections });
   return Buffer.from(await Packer.toBuffer(document));
 }
 
@@ -458,8 +1276,8 @@ const INLINE_WEBCHAT_HTML = `<!DOCTYPE html>
       ws.onopen = () => addMsg('Polaczono z Mecenasem', 'system');
       ws.onmessage = (e) => {
         const msg = JSON.parse(e.data);
-        if (msg.type === 'connected') { chatId = msg.chatId; addMsg(msg.message, 'system'); }
-        else if (msg.type === 'message') { addMsg(msg.text, 'assistant'); sendBtn.disabled = false; }
+        if (msg.type === 'authenticated') { chatId = msg.chatId; addMsg(msg.message, 'system'); }
+        else if (msg.type === 'message' || msg.type === 'reminder') { addMsg(msg.text, 'assistant'); sendBtn.disabled = false; }
       };
       ws.onclose = () => { addMsg('Rozlaczono. Odswiezam...', 'system'); setTimeout(connect, 2000); };
       ws.onerror = () => {};

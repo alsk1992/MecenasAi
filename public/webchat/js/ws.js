@@ -62,7 +62,7 @@ export class WSClient {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     // Never include sessionId in URL — avoids server-side eviction loops.
     // We send a 'switch' message after auth to set the desired session.
-    const url = `${proto}//${location.host}/chat`;
+    const url = `${proto}//${location.host}/ws`;
 
     const ws = new WebSocket(url);
     this.ws = ws;
@@ -125,16 +125,24 @@ export class WSClient {
 
   send(text, attachments) {
     if (this.ws?.readyState === WebSocket.OPEN) {
-      const msg = { type: 'message', text };
-      if (attachments?.length) msg.attachments = attachments;
-      this.ws.send(JSON.stringify(msg));
+      try {
+        const msg = { type: 'message', text };
+        if (attachments?.length) msg.attachments = attachments;
+        this.ws.send(JSON.stringify(msg));
+      } catch (err) {
+        this._emit('error', err);
+      }
     }
   }
 
   switchSession(sessionId) {
     this.sessionId = sessionId;
     if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ type: 'switch', sessionId }));
+      try {
+        this.ws.send(JSON.stringify({ type: 'switch', sessionId }));
+      } catch (err) {
+        this._emit('error', err);
+      }
     }
   }
 

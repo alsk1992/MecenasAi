@@ -8,6 +8,7 @@ import { join } from 'path';
 import { mkdirSync, existsSync, readFileSync, writeFileSync, renameSync } from 'fs';
 import { logger } from '../utils/logger.js';
 import { resolveStateDir } from '../config/index.js';
+import { generateId as secureId } from '../utils/id.js';
 import type {
   User,
   Session,
@@ -17,6 +18,7 @@ import type {
   Deadline,
   LegalArticle,
   TimeEntry,
+  DocumentTemplate,
   ConversationMessage,
 } from '../types.js';
 
@@ -24,6 +26,12 @@ import type {
 type SqlParam = string | number | null | undefined;
 function bindParams(params: SqlParam[]): (string | number | null)[] {
   return params.map(p => p === undefined ? null : p);
+}
+
+/** Safe JSON.parse with fallback on error (prevents corrupt DB data from crashing) */
+function safeJsonParse<T>(str: string | null | undefined, fallback: T): T {
+  if (!str) return fallback;
+  try { return JSON.parse(str); } catch { return fallback; }
 }
 
 const DB_DIR = resolveStateDir();
@@ -108,7 +116,7 @@ const SCHEMA = `
     notes TEXT,
     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000),
     updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000),
-    FOREIGN KEY (client_id) REFERENCES clients(id)
+    FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE CASCADE
   );
 
   CREATE TABLE IF NOT EXISTS documents (
@@ -123,7 +131,7 @@ const SCHEMA = `
     notes TEXT,
     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000),
     updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000),
-    FOREIGN KEY (case_id) REFERENCES cases(id)
+    FOREIGN KEY (case_id) REFERENCES cases(id) ON DELETE CASCADE
   );
 
   CREATE TABLE IF NOT EXISTS deadlines (
@@ -136,7 +144,7 @@ const SCHEMA = `
     reminder_days_before INTEGER NOT NULL DEFAULT 3,
     notes TEXT,
     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000),
-    FOREIGN KEY (case_id) REFERENCES cases(id)
+    FOREIGN KEY (case_id) REFERENCES cases(id) ON DELETE CASCADE
   );
 
   CREATE TABLE IF NOT EXISTS legal_knowledge (
@@ -159,8 +167,23 @@ const SCHEMA = `
     hourly_rate REAL,
     date INTEGER NOT NULL,
     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000),
-    FOREIGN KEY (case_id) REFERENCES cases(id)
+    FOREIGN KEY (case_id) REFERENCES cases(id) ON DELETE CASCADE
   );
+
+  CREATE TABLE IF NOT EXISTS templates (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    type TEXT NOT NULL DEFAULT 'pismo_procesowe',
+    content TEXT NOT NULL DEFAULT '',
+    description TEXT,
+    law_area TEXT,
+    tags TEXT,
+    use_count INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000),
+    updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_templates_type ON templates(type);
 
   CREATE TABLE IF NOT EXISTS embeddings (
     id TEXT PRIMARY KEY,
@@ -173,6 +196,7 @@ const SCHEMA = `
 
   CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
   CREATE INDEX IF NOT EXISTS idx_sessions_channel ON sessions(channel, chat_id);
+  CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at);
   CREATE INDEX IF NOT EXISTS idx_cases_client ON cases(client_id);
   CREATE INDEX IF NOT EXISTS idx_cases_status ON cases(status);
   CREATE INDEX IF NOT EXISTS idx_documents_case ON documents(case_id);
@@ -182,11 +206,76 @@ const SCHEMA = `
   CREATE INDEX IF NOT EXISTS idx_legal_knowledge_article ON legal_knowledge(code_name, article_number);
   CREATE INDEX IF NOT EXISTS idx_embeddings_source ON embeddings(source_type, source_id);
   CREATE INDEX IF NOT EXISTS idx_time_entries_case ON time_entries(case_id);
+  CREATE INDEX IF NOT EXISTS idx_clients_email ON clients(email);
+  CREATE INDEX IF NOT EXISTS idx_clients_nip ON clients(nip);
 
   CREATE TABLE IF NOT EXISTS _schema_version (
     version INTEGER NOT NULL DEFAULT 1
   );
 `;
+
+// =============================================================================
+// SCHEMA MIGRATIONS
+// =============================================================================
+
+/** Current schema version — increment when adding migrations */
+const CURRENT_SCHEMA_VERSION = 2;
+
+/** Each migration upgrades from (version - 1) to version */
+const MIGRATIONS: Record<number, string[]> = {
+  // Version 2: add sessions.updated_at index + enable foreign keys
+  2: [
+    'CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at)',
+    'PRAGMA foreign_keys = ON',
+  ],
+};
+
+function getSchemaVersion(sqlDb: import('sql.js').Database): number {
+  try {
+    const rows = sqlDb.exec('SELECT version FROM _schema_version LIMIT 1');
+    if (rows.length && rows[0].values.length) {
+      return rows[0].values[0][0] as number;
+    }
+  } catch {
+    // Table may not exist yet
+  }
+  return 0;
+}
+
+function runMigrations(sqlDb: import('sql.js').Database): void {
+  let version = getSchemaVersion(sqlDb);
+
+  if (version === 0) {
+    // Fresh database — set to current version after schema creation
+    sqlDb.run('INSERT INTO _schema_version (version) VALUES (?)', [CURRENT_SCHEMA_VERSION]);
+    logger.info({ version: CURRENT_SCHEMA_VERSION }, 'Schema initialized');
+    return;
+  }
+
+  if (version >= CURRENT_SCHEMA_VERSION) return;
+
+  logger.info({ from: version, to: CURRENT_SCHEMA_VERSION }, 'Running schema migrations');
+
+  for (let v = version + 1; v <= CURRENT_SCHEMA_VERSION; v++) {
+    const stmts = MIGRATIONS[v];
+    if (!stmts) continue;
+    try {
+      sqlDb.run('BEGIN');
+      for (const stmt of stmts) {
+        sqlDb.run(stmt);
+      }
+      sqlDb.run('COMMIT');
+      logger.info({ migration: v }, 'Migration applied');
+    } catch (err) {
+      try { sqlDb.run('ROLLBACK'); } catch { /* rollback best-effort */ }
+      logger.error({ err, migration: v }, 'Migration failed — rolled back');
+      throw new Error(`Schema migration ${v} failed: ${(err as Error).message}`);
+    }
+  }
+
+  sqlDb.run('UPDATE _schema_version SET version = ?', [CURRENT_SCHEMA_VERSION]);
+  logger.info({ version: CURRENT_SCHEMA_VERSION }, 'Schema migrations complete');
+}
 
 export async function initDatabase(): Promise<Database> {
   if (!existsSync(DB_DIR)) mkdirSync(DB_DIR, { recursive: true });
@@ -199,6 +288,11 @@ export async function initDatabase(): Promise<Database> {
       db = new SQL.Database(buffer);
     } catch (err) {
       logger.warn({ err }, 'Nie udało się załadować bazy — tworzenie nowej');
+      try {
+        const corruptedPath = DB_FILE + '.corrupted.' + Date.now();
+        renameSync(DB_FILE, corruptedPath);
+        logger.warn({ backup: corruptedPath }, 'Uszkodzona baza przeniesiona do kopii zapasowej');
+      } catch { /* best effort */ }
       db = new SQL.Database();
     }
   } else {
@@ -213,6 +307,9 @@ export async function initDatabase(): Promise<Database> {
     db.run(stmt + ';');
   }
 
+  // Run schema migrations
+  runMigrations(db);
+
   saveDatabase();
 
   logger.info({ path: DB_FILE }, 'Baza danych zainicjalizowana');
@@ -221,7 +318,7 @@ export async function initDatabase(): Promise<Database> {
 }
 
 function generateId(): string {
-  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  return secureId();
 }
 
 export interface Database {
@@ -233,7 +330,9 @@ export interface Database {
   // Sessions
   getSession(key: string): Session | null;
   upsertSession(session: Partial<Session> & { key: string; userId: string; channel: string; chatId: string }): void;
+  updateSessionTitle(key: string, title: string): void;
   deleteSession(key: string): void;
+  listSessionsForUser(userId: string): Array<{ id: string; title: string | null; lastMessage: string | null; updatedAt: number }>;
   getLatestSessionForChat(channel: string, chatId: string): Session | null;
   getLatestSessionForUser(userId: string): Session | null;
 
@@ -242,13 +341,16 @@ export interface Database {
   getClient(id: string): LegalClient | null;
   listClients(): LegalClient[];
   updateClient(id: string, updates: Partial<LegalClient>): LegalClient | null;
+  deleteClient(id: string): void;
   searchClients(query: string): LegalClient[];
 
   // Cases
   createCase(legalCase: Omit<LegalCase, 'id' | 'createdAt' | 'updatedAt'>): LegalCase;
   getCase(id: string): LegalCase | null;
   listCases(filters?: { clientId?: string; status?: string; lawArea?: string }): LegalCase[];
+  searchCases(query: string): LegalCase[];
   updateCase(id: string, updates: Partial<LegalCase>): LegalCase | null;
+  deleteCase(id: string): void;
 
   // Documents
   createDocument(doc: Omit<LegalDocument, 'id' | 'createdAt' | 'updatedAt'>): LegalDocument;
@@ -257,10 +359,15 @@ export interface Database {
   updateDocument(id: string, updates: Partial<LegalDocument>): LegalDocument | null;
   getDocumentVersions(id: string): LegalDocument[];
 
+  // Documents (delete)
+  deleteDocument(id: string): void;
+
   // Deadlines
   createDeadline(deadline: Omit<Deadline, 'id' | 'createdAt'>): Deadline;
   listDeadlines(filters?: { caseId?: string; upcoming?: boolean; completed?: boolean }): Deadline[];
   completeDeadline(id: string): void;
+  updateDeadline(id: string, updates: Partial<Pick<Deadline, 'title' | 'date' | 'type' | 'notes' | 'reminderDaysBefore'>>): Deadline | null;
+  deleteDeadline(id: string): void;
 
   // Legal Knowledge
   upsertArticle(article: Omit<LegalArticle, 'id' | 'updatedAt'>): LegalArticle;
@@ -272,6 +379,13 @@ export interface Database {
   // Time Entries
   createTimeEntry(entry: Omit<TimeEntry, 'id' | 'createdAt'>): TimeEntry;
   listTimeEntries(caseId: string): TimeEntry[];
+
+  // Templates
+  createTemplate(template: Omit<DocumentTemplate, 'id' | 'useCount' | 'createdAt' | 'updatedAt'>): DocumentTemplate;
+  getTemplate(id: string): DocumentTemplate | null;
+  listTemplates(filters?: { type?: string; lawArea?: string; query?: string }): DocumentTemplate[];
+  incrementTemplateUseCount(id: string): void;
+  deleteTemplate(id: string): void;
 
   // Embeddings
   storeEmbedding(id: string, sourceType: string, sourceId: string, vector: Float32Array, contentHash?: string): void;
@@ -317,7 +431,7 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
     },
 
     listUsers(): User[] {
-      const rows = sqlDb.exec('SELECT id, name, created_at, updated_at FROM users');
+      const rows = sqlDb.exec('SELECT id, name, created_at, updated_at FROM users LIMIT 1000');
       if (!rows.length) return [];
       return rows[0].values.map(v => ({
         id: v[0] as string,
@@ -340,7 +454,8 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
         chatId: v[4] as string,
         model: v[5] as string | undefined,
         thinking: v[6] as string | undefined,
-        messages: JSON.parse((v[7] as string) || '[]'),
+        messages: safeJsonParse(v[7] as string, []),
+        metadata: v[8] ? safeJsonParse(v[8] as string, undefined) : undefined,
         createdAt: new Date(v[9] as number),
         updatedAt: new Date(v[10] as number),
       };
@@ -348,23 +463,52 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
 
     upsertSession(session) {
       const existing = this.getSession(session.key);
+      const metaJson = session.metadata ? JSON.stringify(session.metadata) : existing?.metadata ? JSON.stringify(existing.metadata) : null;
       if (existing) {
         sqlDb.run(
-          'UPDATE sessions SET messages = ?, model = ?, thinking = ?, updated_at = ? WHERE key = ?',
-          [JSON.stringify(session.messages ?? existing.messages), session.model ?? existing.model ?? null, session.thinking ?? existing.thinking ?? null, now(), session.key]
+          'UPDATE sessions SET messages = ?, model = ?, thinking = ?, metadata = ?, updated_at = ? WHERE key = ?',
+          [JSON.stringify(session.messages ?? existing.messages), session.model ?? existing.model ?? null, session.thinking ?? existing.thinking ?? null, metaJson, now(), session.key]
         );
       } else {
         sqlDb.run(
-          'INSERT INTO sessions (key, user_id, account_id, channel, chat_id, model, thinking, messages, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-          [session.key, session.userId, session.accountId ?? null, session.channel, session.chatId, session.model ?? null, session.thinking ?? null, JSON.stringify(session.messages ?? []), now(), now()]
+          'INSERT INTO sessions (key, user_id, account_id, channel, chat_id, model, thinking, messages, metadata, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [session.key, session.userId, session.accountId ?? null, session.channel, session.chatId, session.model ?? null, session.thinking ?? null, JSON.stringify(session.messages ?? []), metaJson, now(), now()]
         );
       }
+      scheduleSave();
+    },
+
+    updateSessionTitle(key: string, title: string) {
+      const session = this.getSession(key);
+      if (!session) return;
+      const meta = session.metadata ?? {};
+      meta.title = title;
+      sqlDb.run('UPDATE sessions SET metadata = ?, updated_at = ? WHERE key = ?', [JSON.stringify(meta), now(), key]);
       scheduleSave();
     },
 
     deleteSession(key: string) {
       sqlDb.run('DELETE FROM sessions WHERE key = ?', [key]);
       scheduleSave();
+    },
+
+    listSessionsForUser(userId: string) {
+      const rows = sqlDb.exec(
+        'SELECT key, metadata, messages, updated_at FROM sessions WHERE user_id = ? ORDER BY updated_at DESC LIMIT 100',
+        [userId]
+      );
+      if (!rows.length) return [];
+      return rows[0].values.map(v => {
+        const meta = safeJsonParse(v[1] as string, {} as Record<string, unknown>);
+        const msgs = safeJsonParse(v[2] as string, [] as Array<{ role: string; content: string }>);
+        const lastUserMsg = [...msgs].reverse().find(m => m.role === 'user');
+        return {
+          id: v[0] as string,
+          title: (meta.title as string) ?? null,
+          lastMessage: lastUserMsg?.content?.slice(0, 100) ?? null,
+          updatedAt: v[3] as number,
+        };
+      });
     },
 
     getLatestSessionForChat(channel: string, chatId: string): Session | null {
@@ -406,7 +550,7 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
     },
 
     listClients() {
-      const rows = sqlDb.exec('SELECT * FROM clients ORDER BY name');
+      const rows = sqlDb.exec('SELECT * FROM clients ORDER BY name LIMIT 200');
       if (!rows.length) return [];
       return rows[0].values.map(v => ({
         id: v[0] as string, name: v[1] as string, type: v[2] as any,
@@ -421,11 +565,17 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
     updateClient(id: string, updates: Partial<LegalClient>) {
       const existing = this.getClient(id);
       if (!existing) return null;
+      const fieldMap: Record<string, string> = {
+        name: 'name', type: 'type', pesel: 'pesel', nip: 'nip',
+        regon: 'regon', krs: 'krs', email: 'email', phone: 'phone',
+        address: 'address', notes: 'notes',
+      };
       const fields: string[] = [];
       const values: SqlParam[] = [];
       for (const [key, val] of Object.entries(updates)) {
-        if (key === 'id' || key === 'createdAt' || key === 'updatedAt') continue;
-        fields.push(`${key} = ?`);
+        const col = fieldMap[key];
+        if (!col) continue;
+        fields.push(`${col} = ?`);
         values.push(val as SqlParam);
       }
       if (fields.length === 0) return existing;
@@ -437,10 +587,21 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
       return this.getClient(id);
     },
 
+    deleteClient(id: string) {
+      // Cascade: remove linked cases (which cascades to documents, deadlines, time entries)
+      const cases = this.listCases({ clientId: id });
+      for (const c of cases) {
+        this.deleteCase(c.id);
+      }
+      sqlDb.run('DELETE FROM clients WHERE id = ?', [id]);
+      scheduleSave();
+    },
+
     searchClients(query: string) {
-      const pattern = `%${query}%`;
+      const escaped = query.trim().replace(/[%_]/g, '\\$&');
+      const pattern = `%${escaped}%`;
       const rows = sqlDb.exec(
-        'SELECT * FROM clients WHERE name LIKE ? OR pesel LIKE ? OR nip LIKE ? OR email LIKE ? ORDER BY name',
+        "SELECT * FROM clients WHERE name LIKE ? ESCAPE '\\' OR pesel LIKE ? ESCAPE '\\' OR nip LIKE ? ESCAPE '\\' OR email LIKE ? ESCAPE '\\' ORDER BY name LIMIT 200",
         [pattern, pattern, pattern, pattern]
       );
       if (!rows.length) return [];
@@ -501,6 +662,25 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
       }));
     },
 
+    searchCases(query: string) {
+      const escaped = query.trim().replace(/[%_]/g, '\\$&');
+      const pattern = `%${escaped}%`;
+      const rows = sqlDb.exec(
+        `SELECT * FROM cases WHERE (title LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\' OR opposing_party LIKE ? ESCAPE '\\' OR sygnatura LIKE ? ESCAPE '\\') ORDER BY updated_at DESC LIMIT 50`,
+        bindParams([pattern, pattern, pattern, pattern])
+      );
+      if (!rows.length) return [];
+      return rows[0].values.map(v => ({
+        id: v[0] as string, clientId: v[1] as string, title: v[2] as string,
+        sygnatura: v[3] as string | undefined, court: v[4] as string | undefined,
+        lawArea: v[5] as any, status: v[6] as any,
+        description: v[7] as string | undefined,
+        opposingParty: v[8] as string | undefined, opposingCounsel: v[9] as string | undefined,
+        valueOfDispute: v[10] as number | undefined, notes: v[11] as string | undefined,
+        createdAt: new Date(v[12] as number), updatedAt: new Date(v[13] as number),
+      }));
+    },
+
     updateCase(id: string, updates: Partial<LegalCase>) {
       const existing = this.getCase(id);
       if (!existing) return null;
@@ -525,6 +705,15 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
       sqlDb.run(`UPDATE cases SET ${fields.join(', ')} WHERE id = ?`, bindParams(values));
       scheduleSave();
       return this.getCase(id);
+    },
+
+    deleteCase(id: string) {
+      // Cascade: delete documents, deadlines, time entries linked to this case
+      sqlDb.run('DELETE FROM documents WHERE case_id = ?', [id]);
+      sqlDb.run('DELETE FROM deadlines WHERE case_id = ?', [id]);
+      sqlDb.run('DELETE FROM time_entries WHERE case_id = ?', [id]);
+      sqlDb.run('DELETE FROM cases WHERE id = ?', [id]);
+      scheduleSave();
     },
 
     // ===== DOCUMENTS =====
@@ -559,7 +748,7 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
       if (filters?.caseId) { sql += ' AND case_id = ?'; params.push(filters.caseId); }
       if (filters?.status) { sql += ' AND status = ?'; params.push(filters.status); }
       if (filters?.type) { sql += ' AND type = ?'; params.push(filters.type); }
-      sql += ' ORDER BY updated_at DESC';
+      sql += ' ORDER BY updated_at DESC LIMIT 200';
       const rows = sqlDb.exec(sql, bindParams(params));
       if (!rows.length) return [];
       return rows[0].values.map(v => ({
@@ -615,6 +804,11 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
       }));
     },
 
+    deleteDocument(id: string) {
+      sqlDb.run('DELETE FROM documents WHERE id = ?', [id]);
+      scheduleSave();
+    },
+
     // ===== DEADLINES =====
     createDeadline(deadline) {
       const id = generateId();
@@ -647,6 +841,47 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
 
     completeDeadline(id: string) {
       sqlDb.run('UPDATE deadlines SET completed = 1 WHERE id = ?', [id]);
+      scheduleSave();
+    },
+
+    updateDeadline(id: string, updates: Partial<Pick<Deadline, 'title' | 'date' | 'type' | 'notes' | 'reminderDaysBefore'>>) {
+      const rows = sqlDb.exec('SELECT * FROM deadlines WHERE id = ?', [id]);
+      if (!rows.length || !rows[0].values.length) return null;
+      const fieldMap: Record<string, string> = {
+        title: 'title', date: 'date', type: 'type',
+        notes: 'notes', reminderDaysBefore: 'reminder_days_before',
+      };
+      const fields: string[] = [];
+      const values: SqlParam[] = [];
+      for (const [key, val] of Object.entries(updates)) {
+        const col = fieldMap[key];
+        if (!col) continue;
+        if (key === 'date' && val instanceof Date) {
+          fields.push(`${col} = ?`);
+          values.push(val.getTime());
+        } else {
+          fields.push(`${col} = ?`);
+          values.push(val as SqlParam);
+        }
+      }
+      if (!fields.length) return null;
+      values.push(id);
+      sqlDb.run(`UPDATE deadlines SET ${fields.join(', ')} WHERE id = ?`, bindParams(values));
+      scheduleSave();
+      const updated = sqlDb.exec('SELECT * FROM deadlines WHERE id = ?', [id]);
+      if (!updated.length || !updated[0].values.length) return null;
+      const v = updated[0].values[0];
+      return {
+        id: v[0] as string, caseId: v[1] as string,
+        title: v[2] as string, date: new Date(v[3] as number),
+        type: v[4] as any, completed: !!(v[5] as number),
+        reminderDaysBefore: v[6] as number, notes: v[7] as string | undefined,
+        createdAt: new Date(v[8] as number),
+      };
+    },
+
+    deleteDeadline(id: string) {
+      sqlDb.run('DELETE FROM deadlines WHERE id = ?', [id]);
       scheduleSave();
     },
 
@@ -687,11 +922,14 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
     },
 
     searchArticles(query: string, codeName?: string, limit = 20) {
-      const pattern = `%${query}%`;
-      let sql = 'SELECT * FROM legal_knowledge WHERE (content LIKE ? OR article_number LIKE ? OR title LIKE ?)';
+      const escaped = query.trim().replace(/[%_]/g, '\\$&');
+      const pattern = `%${escaped}%`;
+      let sql = "SELECT * FROM legal_knowledge WHERE (content LIKE ? ESCAPE '\\' OR article_number LIKE ? ESCAPE '\\' OR title LIKE ? ESCAPE '\\')";
       const params: SqlParam[] = [pattern, pattern, pattern];
       if (codeName) { sql += ' AND code_name = ?'; params.push(codeName); }
-      sql += ` LIMIT ${limit}`;
+      const safeLimit = Math.max(1, Math.min(Number(limit) || 20, 100));
+      sql += ' LIMIT ?';
+      params.push(safeLimit);
       const rows = sqlDb.exec(sql, bindParams(params));
       if (!rows.length) return [];
       return rows[0].values.map(v => ({
@@ -737,7 +975,7 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
     },
 
     listTimeEntries(caseId: string) {
-      const rows = sqlDb.exec('SELECT * FROM time_entries WHERE case_id = ? ORDER BY date DESC', [caseId]);
+      const rows = sqlDb.exec('SELECT * FROM time_entries WHERE case_id = ? ORDER BY date DESC LIMIT 500', [caseId]);
       if (!rows.length) return [];
       return rows[0].values.map(v => ({
         id: v[0] as string, caseId: v[1] as string,
@@ -745,6 +983,64 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
         hourlyRate: v[4] as number | undefined, date: new Date(v[5] as number),
         createdAt: new Date(v[6] as number),
       }));
+    },
+
+    // ===== TEMPLATES =====
+    createTemplate(template) {
+      const id = generateId();
+      const ts = now();
+      sqlDb.run(
+        'INSERT INTO templates (id, name, type, content, description, law_area, tags, use_count, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)',
+        [id, template.name, template.type, template.content, template.description ?? null, template.lawArea ?? null, template.tags ?? null, ts, ts]
+      );
+      scheduleSave();
+      return { id, ...template, useCount: 0, createdAt: new Date(ts), updatedAt: new Date(ts) };
+    },
+
+    getTemplate(id: string) {
+      const rows = sqlDb.exec('SELECT * FROM templates WHERE id = ?', [id]);
+      if (!rows.length || !rows[0].values.length) return null;
+      const v = rows[0].values[0];
+      return {
+        id: v[0] as string, name: v[1] as string, type: v[2] as any,
+        content: v[3] as string, description: v[4] as string | undefined,
+        lawArea: v[5] as any, tags: v[6] as string | undefined,
+        useCount: v[7] as number,
+        createdAt: new Date(v[8] as number), updatedAt: new Date(v[9] as number),
+      };
+    },
+
+    listTemplates(filters) {
+      let sql = 'SELECT * FROM templates WHERE 1=1';
+      const params: SqlParam[] = [];
+      if (filters?.type) { sql += ' AND type = ?'; params.push(filters.type); }
+      if (filters?.lawArea) { sql += ' AND law_area = ?'; params.push(filters.lawArea); }
+      if (filters?.query) {
+        const escaped = filters.query.trim().replace(/[%_]/g, '\\$&');
+        const pattern = `%${escaped}%`;
+        sql += " AND (name LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\')";
+        params.push(pattern, pattern, pattern);
+      }
+      sql += ' ORDER BY use_count DESC, updated_at DESC';
+      const rows = sqlDb.exec(sql, bindParams(params));
+      if (!rows.length) return [];
+      return rows[0].values.map(v => ({
+        id: v[0] as string, name: v[1] as string, type: v[2] as any,
+        content: v[3] as string, description: v[4] as string | undefined,
+        lawArea: v[5] as any, tags: v[6] as string | undefined,
+        useCount: v[7] as number,
+        createdAt: new Date(v[8] as number), updatedAt: new Date(v[9] as number),
+      }));
+    },
+
+    incrementTemplateUseCount(id: string) {
+      sqlDb.run('UPDATE templates SET use_count = use_count + 1, updated_at = ? WHERE id = ?', [now(), id]);
+      scheduleSave();
+    },
+
+    deleteTemplate(id: string) {
+      sqlDb.run('DELETE FROM templates WHERE id = ?', [id]);
+      scheduleSave();
     },
 
     // ===== EMBEDDINGS =====
@@ -762,6 +1058,7 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
       if (!rows.length || !rows[0].values.length) return null;
       const v = rows[0].values[0];
       const buf = v[1] as Uint8Array;
+      if (buf.byteLength % 4 !== 0) return null;
       return { id: v[0] as string, vector: new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4) };
     },
 
@@ -775,6 +1072,7 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
       const results: Array<{ id: string; sourceId: string; similarity: number }> = [];
       for (const row of rows[0].values) {
         const buf = row[2] as Uint8Array;
+        if (buf.byteLength % 4 !== 0) continue;
         const stored = new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
         const sim = cosineSimilarity(vector, stored);
         results.push({ id: row[0] as string, sourceId: row[1] as string, similarity: sim });
@@ -802,7 +1100,7 @@ function cosineSimilarity(a: Float32Array, b: Float32Array): number {
     normB += b[i] * b[i];
   }
   const denom = Math.sqrt(normA) * Math.sqrt(normB);
-  return denom === 0 ? 0 : dot / denom;
+  return Math.abs(denom) < 1e-10 ? 0 : dot / denom;
 }
 
 export { createDatabaseInterface };
