@@ -5,7 +5,7 @@
 
 import initSqlJs, { Database as SqlJsDatabase } from 'sql.js';
 import { join } from 'path';
-import { mkdirSync, existsSync, readFileSync, writeFileSync, renameSync } from 'fs';
+import { mkdirSync, existsSync, readFileSync, writeFileSync, renameSync, readdirSync, unlinkSync, copyFileSync } from 'fs';
 import { logger } from '../utils/logger.js';
 import { resolveStateDir } from '../config/index.js';
 import { generateId as secureId } from '../utils/id.js';
@@ -19,6 +19,7 @@ import type {
   LegalArticle,
   TimeEntry,
   DocumentTemplate,
+  Invoice,
   ConversationMessage,
 } from '../types.js';
 
@@ -60,6 +61,32 @@ function saveDatabase(): void {
   } catch (err) {
     logger.error({ err }, 'Błąd zapisu bazy danych');
   }
+}
+
+const MAX_BACKUPS = 7;
+function performBackup(): void {
+  if (!existsSync(DB_FILE)) return;
+  try {
+    const dateStr = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    const backupFile = join(BACKUP_DIR, `mecenas-${dateStr}.db`);
+    if (existsSync(backupFile)) return; // already backed up today
+    copyFileSync(DB_FILE, backupFile);
+    logger.info({ backup: backupFile }, 'Kopia zapasowa bazy danych utworzona');
+    // Prune old backups — keep only last MAX_BACKUPS
+    const files = readdirSync(BACKUP_DIR)
+      .filter(f => f.startsWith('mecenas-') && f.endsWith('.db'))
+      .sort();
+    while (files.length > MAX_BACKUPS) {
+      const old = files.shift()!;
+      try { unlinkSync(join(BACKUP_DIR, old)); } catch { /* best effort */ }
+    }
+  } catch (err) {
+    logger.warn({ err }, 'Nie udało się utworzyć kopii zapasowej');
+  }
+}
+function scheduleBackup(): void {
+  performBackup(); // immediate on startup
+  setInterval(performBackup, 24 * 60 * 60 * 1000); // then every 24h
 }
 
 const SCHEMA = `
@@ -219,7 +246,7 @@ const SCHEMA = `
 // =============================================================================
 
 /** Current schema version — increment when adding migrations */
-const CURRENT_SCHEMA_VERSION = 2;
+const CURRENT_SCHEMA_VERSION = 3;
 
 /** Each migration upgrades from (version - 1) to version */
 const MIGRATIONS: Record<number, string[]> = {
@@ -227,6 +254,26 @@ const MIGRATIONS: Record<number, string[]> = {
   2: [
     'CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at)',
     'PRAGMA foreign_keys = ON',
+  ],
+  3: [
+    `CREATE TABLE IF NOT EXISTS invoices (
+      id TEXT PRIMARY KEY,
+      client_id TEXT NOT NULL,
+      case_id TEXT,
+      number TEXT NOT NULL,
+      amount REAL NOT NULL DEFAULT 0,
+      currency TEXT NOT NULL DEFAULT 'PLN',
+      status TEXT NOT NULL DEFAULT 'szkic',
+      issued_at INTEGER NOT NULL,
+      due_at INTEGER NOT NULL,
+      paid_at INTEGER,
+      notes TEXT,
+      created_at INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000),
+      FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE CASCADE,
+      FOREIGN KEY (case_id) REFERENCES cases(id) ON DELETE SET NULL
+    )`,
+    'CREATE INDEX IF NOT EXISTS idx_invoices_client ON invoices(client_id)',
+    'CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status)',
   ],
 };
 
@@ -310,7 +357,18 @@ export async function initDatabase(): Promise<Database> {
   // Run schema migrations
   runMigrations(db);
 
+  // VACUUM to reclaim space on startup
+  try {
+    db.run('VACUUM;');
+  } catch (err) {
+    logger.warn({ err }, 'VACUUM nie powiódł się — kontynuuję');
+  }
+
   saveDatabase();
+
+  // Daily backup — copy DB file to backups/ with date stamp, keep last 7
+  if (!existsSync(BACKUP_DIR)) mkdirSync(BACKUP_DIR, { recursive: true });
+  scheduleBackup();
 
   logger.info({ path: DB_FILE }, 'Baza danych zainicjalizowana');
 
@@ -364,6 +422,7 @@ export interface Database {
 
   // Deadlines
   createDeadline(deadline: Omit<Deadline, 'id' | 'createdAt'>): Deadline;
+  getDeadline(id: string): Deadline | null;
   listDeadlines(filters?: { caseId?: string; upcoming?: boolean; completed?: boolean }): Deadline[];
   completeDeadline(id: string): void;
   updateDeadline(id: string, updates: Partial<Pick<Deadline, 'title' | 'date' | 'type' | 'notes' | 'reminderDaysBefore'>>): Deadline | null;
@@ -375,6 +434,12 @@ export interface Database {
   searchArticles(query: string, codeName?: string, limit?: number): LegalArticle[];
   listArticles(codeName: string): LegalArticle[];
   countArticles(codeName?: string): number;
+
+  // Invoices
+  createInvoice(invoice: Omit<Invoice, 'id' | 'createdAt'>): Invoice;
+  getInvoice(id: string): Invoice | null;
+  listInvoices(filters?: { clientId?: string; caseId?: string; status?: string }): Invoice[];
+  updateInvoice(id: string, updates: Partial<Pick<Invoice, 'status' | 'amount' | 'paidAt' | 'notes'>>): Invoice | null;
 
   // Time Entries
   createTimeEntry(entry: Omit<TimeEntry, 'id' | 'createdAt'>): TimeEntry;
@@ -821,6 +886,19 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
       return { id, ...deadline, createdAt: new Date(ts) };
     },
 
+    getDeadline(id: string): Deadline | null {
+      const rows = sqlDb.exec('SELECT * FROM deadlines WHERE id = ?', [id]);
+      if (!rows.length || !rows[0].values.length) return null;
+      const v = rows[0].values[0];
+      return {
+        id: v[0] as string, caseId: v[1] as string,
+        title: v[2] as string, date: new Date(v[3] as number),
+        type: v[4] as any, completed: !!(v[5] as number),
+        reminderDaysBefore: v[6] as number, notes: v[7] as string | undefined,
+        createdAt: new Date(v[8] as number),
+      };
+    },
+
     listDeadlines(filters) {
       let sql = 'SELECT * FROM deadlines WHERE 1=1';
       const params: SqlParam[] = [];
@@ -960,6 +1038,82 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
       const rows = sqlDb.exec(sql, codeName ? [codeName] : []);
       if (!rows.length) return 0;
       return rows[0].values[0][0] as number;
+    },
+
+    // ===== TIME ENTRIES =====
+    // ===== INVOICES =====
+    createInvoice(invoice) {
+      const id = generateId();
+      const ts = now();
+      sqlDb.run(
+        'INSERT INTO invoices (id, client_id, case_id, number, amount, currency, status, issued_at, due_at, paid_at, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [id, invoice.clientId, invoice.caseId ?? null, invoice.number, invoice.amount, invoice.currency, invoice.status,
+         invoice.issuedAt.getTime(), invoice.dueAt.getTime(), invoice.paidAt ? invoice.paidAt.getTime() : null,
+         (invoice as any).notes ?? null, ts]
+      );
+      scheduleSave();
+      return { id, ...invoice, createdAt: new Date(ts) };
+    },
+
+    getInvoice(id: string): Invoice | null {
+      const rows = sqlDb.exec('SELECT * FROM invoices WHERE id = ?', [id]);
+      if (!rows.length || !rows[0].values.length) return null;
+      const v = rows[0].values[0];
+      return {
+        id: v[0] as string, clientId: v[1] as string,
+        caseId: v[2] as string | undefined, number: v[3] as string,
+        amount: v[4] as number, currency: v[5] as string,
+        status: v[6] as any, issuedAt: new Date(v[7] as number),
+        dueAt: new Date(v[8] as number),
+        paidAt: v[9] ? new Date(v[9] as number) : undefined,
+        createdAt: new Date(v[11] as number),
+      };
+    },
+
+    listInvoices(filters) {
+      let sql = 'SELECT * FROM invoices WHERE 1=1';
+      const params: SqlParam[] = [];
+      if (filters?.clientId) { sql += ' AND client_id = ?'; params.push(filters.clientId); }
+      if (filters?.caseId) { sql += ' AND case_id = ?'; params.push(filters.caseId); }
+      if (filters?.status) { sql += ' AND status = ?'; params.push(filters.status); }
+      sql += ' ORDER BY issued_at DESC LIMIT 500';
+      const rows = sqlDb.exec(sql, bindParams(params));
+      if (!rows.length) return [];
+      return rows[0].values.map(v => ({
+        id: v[0] as string, clientId: v[1] as string,
+        caseId: v[2] as string | undefined, number: v[3] as string,
+        amount: v[4] as number, currency: v[5] as string,
+        status: v[6] as any, issuedAt: new Date(v[7] as number),
+        dueAt: new Date(v[8] as number),
+        paidAt: v[9] ? new Date(v[9] as number) : undefined,
+        createdAt: new Date(v[11] as number),
+      }));
+    },
+
+    updateInvoice(id: string, updates: Partial<Pick<Invoice, 'status' | 'amount' | 'paidAt'> & { notes?: string }>) {
+      const existing = this.getInvoice(id);
+      if (!existing) return null;
+      const fieldMap: Record<string, string> = {
+        status: 'status', amount: 'amount', notes: 'notes',
+      };
+      const fields: string[] = [];
+      const values: SqlParam[] = [];
+      for (const [key, val] of Object.entries(updates)) {
+        if (key === 'paidAt') {
+          fields.push('paid_at = ?');
+          values.push(val instanceof Date ? val.getTime() : val as SqlParam);
+          continue;
+        }
+        const col = fieldMap[key];
+        if (!col) continue;
+        fields.push(`${col} = ?`);
+        values.push(val as SqlParam);
+      }
+      if (!fields.length) return null;
+      values.push(id);
+      sqlDb.run(`UPDATE invoices SET ${fields.join(', ')} WHERE id = ?`, bindParams(values));
+      scheduleSave();
+      return this.getInvoice(id);
     },
 
     // ===== TIME ENTRIES =====

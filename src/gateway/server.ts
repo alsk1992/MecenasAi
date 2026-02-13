@@ -102,6 +102,14 @@ export function createServer(config: Config, db: Database): HttpServer {
     });
   }
 
+  /** Parse pagination params from URL. Returns paginated result wrapper. */
+  function paginate<T>(items: T[], url: URL): { data: T[]; total: number; page: number; limit: number } {
+    const page = Math.max(1, parseInt(url.searchParams.get('page') ?? '1', 10) || 1);
+    const limit = Math.min(200, Math.max(1, parseInt(url.searchParams.get('limit') ?? '50', 10) || 50));
+    const start = (page - 1) * limit;
+    return { data: items.slice(start, start + limit), total: items.length, page, limit };
+  }
+
   return {
     async start(port, bind, callbacks) {
       server = http.createServer((req, res) => {
@@ -246,7 +254,7 @@ export function createServer(config: Config, db: Database): HttpServer {
           const type = url.searchParams.get('type') ?? undefined;
           const docs = db.listDocuments({ status, caseId, type });
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(docs));
+          res.end(JSON.stringify(paginate(docs, url)));
           return;
         }
 
@@ -380,18 +388,17 @@ export function createServer(config: Config, db: Database): HttpServer {
         // Cases API
         if (pathname === '/api/cases' && req.method === 'GET') {
           const search = url.searchParams.get('search');
+          let cases;
           if (search) {
-            const cases = db.searchCases(search);
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify(cases));
+            cases = db.searchCases(search);
           } else {
             const status = url.searchParams.get('status') ?? undefined;
             const clientId = url.searchParams.get('clientId') ?? undefined;
             const lawArea = url.searchParams.get('lawArea') ?? undefined;
-            const cases = db.listCases({ status, clientId, lawArea });
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify(cases));
+            cases = db.listCases({ status, clientId, lawArea });
           }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(paginate(cases, url)));
           return;
         }
         if (pathname === '/api/cases' && req.method === 'POST') {
@@ -450,7 +457,7 @@ export function createServer(config: Config, db: Database): HttpServer {
           const caseId = url.searchParams.get('caseId') ?? undefined;
           const deadlines = db.listDeadlines({ upcoming, caseId });
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(deadlines));
+          res.end(JSON.stringify(paginate(deadlines, url)));
           return;
         }
         if (pathname === '/api/deadlines' && req.method === 'POST') {
@@ -524,7 +531,7 @@ export function createServer(config: Config, db: Database): HttpServer {
           const q = url.searchParams.get('q');
           const clientList = q ? db.searchClients(q) : db.listClients();
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(clientList));
+          res.end(JSON.stringify(paginate(clientList, url)));
           return;
         }
         if (pathname === '/api/clients' && req.method === 'POST') {
@@ -604,6 +611,69 @@ export function createServer(config: Config, db: Database): HttpServer {
             res.end(JSON.stringify(entry));
           });
           return;
+        }
+
+        // Invoices API
+        if (pathname === '/api/invoices' && req.method === 'GET') {
+          const invoices = db.listInvoices({
+            clientId: url.searchParams.get('clientId') ?? undefined,
+            caseId: url.searchParams.get('caseId') ?? undefined,
+            status: url.searchParams.get('status') ?? undefined,
+          });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(paginate(invoices, url)));
+          return;
+        }
+        if (pathname === '/api/invoices' && req.method === 'POST') {
+          readJsonBody(req, res, (data) => {
+            if (!data.clientId || !data.number || data.amount == null) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'clientId, number i amount są wymagane' }));
+              return;
+            }
+            const amount = Number(data.amount);
+            if (!Number.isFinite(amount) || amount < 0) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Kwota musi być liczbą >= 0' }));
+              return;
+            }
+            const dueDays = Number(data.dueDays ?? 14);
+            const issuedAt = new Date();
+            const dueAt = new Date(issuedAt.getTime() + dueDays * 24 * 60 * 60 * 1000);
+            const invoice = db.createInvoice({
+              clientId: data.clientId as string,
+              caseId: data.caseId as string | undefined,
+              number: data.number as string,
+              amount,
+              currency: ((data.currency as string) ?? 'PLN').toUpperCase(),
+              status: 'szkic',
+              issuedAt,
+              dueAt,
+              notes: data.notes as string | undefined,
+            });
+            res.writeHead(201, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(invoice));
+          });
+          return;
+        }
+        if (pathname.startsWith('/api/invoices/') && pathname.split('/').length === 4) {
+          const invoiceId = decodeURIComponent(pathname.split('/')[3]);
+          if (req.method === 'GET') {
+            const inv = db.getInvoice(invoiceId);
+            if (!inv) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Faktura nie znaleziona' })); return; }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(inv));
+            return;
+          }
+          if (req.method === 'PATCH') {
+            readJsonBody(req, res, (data) => {
+              const updated = db.updateInvoice(invoiceId, data as any);
+              if (!updated) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Faktura nie znaleziona' })); return; }
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify(updated));
+            });
+            return;
+          }
         }
 
         // Knowledge API

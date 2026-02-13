@@ -22,11 +22,13 @@ export class Sidebar {
     this.onDeadlineClick = null;
     this.onNewCase = null;
     this.onNewDeadline = null;
+    this.onNewInvoice = null;
 
     // Cached API data
     this._cases = [];
     this._documents = [];
     this._deadlines = [];
+    this._invoices = [];
 
     // Default expanded on desktop, collapsed on mobile
     const saved = Storage.get('sidebarExpanded');
@@ -133,6 +135,10 @@ export class Sidebar {
     if (newDeadlineBtn) {
       newDeadlineBtn.addEventListener('click', () => this.onNewDeadline?.());
     }
+    const newInvoiceBtn = this.sidebarEl.querySelector('#new-invoice-btn');
+    if (newInvoiceBtn) {
+      newInvoiceBtn.addEventListener('click', () => this.onNewInvoice?.());
+    }
 
     // Context menu (right-click on sessions)
     this._contextMenu = null;
@@ -162,6 +168,7 @@ export class Sidebar {
         cases: 'Szukaj spraw...',
         documents: 'Szukaj dokumentów...',
         deadlines: 'Szukaj terminów...',
+        invoices: 'Szukaj faktur...',
       };
       this.searchEl.placeholder = placeholders[tab] || 'Szukaj...';
     }
@@ -170,6 +177,7 @@ export class Sidebar {
     if (tab === 'cases') this._fetchCases();
     else if (tab === 'documents') this._fetchDocuments();
     else if (tab === 'deadlines') this._fetchDeadlines();
+    else if (tab === 'invoices') this._fetchInvoices();
 
     this._renderActiveTab();
   }
@@ -181,6 +189,7 @@ export class Sidebar {
       case 'cases': this._renderCases(filter); break;
       case 'documents': this._renderDocuments(filter); break;
       case 'deadlines': this._renderDeadlines(filter); break;
+      case 'invoices': this._renderInvoices(filter); break;
     }
   }
 
@@ -395,7 +404,8 @@ export class Sidebar {
         this._showListError('cases-list', 'Nie udało się załadować spraw.');
         return;
       }
-      this._cases = await r.json();
+      const body = await r.json();
+      this._cases = body.data ?? body;
       this._renderActiveTab();
     } catch {
       this._showListError('cases-list', 'Brak połączenia z serwerem.');
@@ -491,7 +501,8 @@ export class Sidebar {
         this._showListError('documents-list', 'Nie udało się załadować dokumentów.');
         return;
       }
-      this._documents = await r.json();
+      const body = await r.json();
+      this._documents = body.data ?? body;
       this._renderActiveTab();
     } catch {
       this._showListError('documents-list', 'Brak połączenia z serwerem.');
@@ -626,7 +637,8 @@ export class Sidebar {
         this._showListError('deadlines-list', 'Nie udało się załadować terminów.');
         return;
       }
-      this._deadlines = await r.json();
+      const body = await r.json();
+      this._deadlines = body.data ?? body;
       this._renderActiveTab();
     } catch {
       this._showListError('deadlines-list', 'Brak połączenia z serwerem.');
@@ -744,6 +756,98 @@ export class Sidebar {
       empty.className = 'session-empty';
       empty.textContent = 'Brak nadchodzących terminów. Dodaj termin przyciskiem powyżej lub poleceniem w czacie.';
       frag.appendChild(empty);
+    }
+
+    listEl.innerHTML = '';
+    listEl.appendChild(frag);
+  }
+
+  // ── Invoices ──
+
+  async _fetchInvoices() {
+    try {
+      const r = await fetch('/api/invoices');
+      if (!r.ok) {
+        this._showListError('invoices-list', 'Nie udało się załadować faktur.');
+        return;
+      }
+      const body = await r.json();
+      this._invoices = body.data ?? body;
+      this._renderActiveTab();
+    } catch {
+      this._showListError('invoices-list', 'Brak połączenia z serwerem.');
+    }
+  }
+
+  _renderInvoices(filter) {
+    const listEl = this.sidebarEl.querySelector('.invoices-list');
+    if (!listEl) return;
+
+    const frag = document.createDocumentFragment();
+    const filtered = filter
+      ? this._invoices.filter(inv =>
+          (inv.number || '').toLowerCase().includes(filter) ||
+          (inv.status || '').toLowerCase().includes(filter))
+      : this._invoices;
+
+    if (!filtered.length) {
+      const empty = document.createElement('div');
+      empty.className = 'session-empty';
+      empty.textContent = filter ? `Brak faktur dla "${filter}"` : 'Brak faktur. Utwórz fakturę poleceniem w czacie.';
+      frag.appendChild(empty);
+      listEl.innerHTML = '';
+      listEl.appendChild(frag);
+      return;
+    }
+
+    const statusLabels = {
+      szkic: 'Szkic',
+      wystawiona: 'Wystawiona',
+      oplacona: 'Opłacona',
+      zalegla: 'Zaległa',
+    };
+    const statusColors = {
+      szkic: 'var(--text-dim)',
+      wystawiona: 'var(--orange)',
+      oplacona: 'var(--green)',
+      zalegla: 'var(--red)',
+    };
+
+    for (const inv of filtered) {
+      const item = document.createElement('div');
+      item.className = 'session-item';
+      item.role = 'listitem';
+
+      const title = document.createElement('div');
+      title.className = 'session-title';
+      title.textContent = inv.number || 'Bez numeru';
+
+      const meta = document.createElement('div');
+      meta.className = 'session-preview';
+      meta.style.display = 'flex';
+      meta.style.justifyContent = 'space-between';
+      meta.style.alignItems = 'center';
+
+      const amount = document.createElement('span');
+      amount.textContent = `${(inv.amount ?? 0).toFixed(2)} ${inv.currency || 'PLN'}`;
+
+      const badge = document.createElement('span');
+      badge.textContent = statusLabels[inv.status] || inv.status;
+      badge.style.cssText = `font-size: 11px; padding: 1px 6px; border-radius: 4px; color: #fff; background: ${statusColors[inv.status] || 'var(--text-dim)'}`;
+
+      meta.appendChild(amount);
+      meta.appendChild(badge);
+      item.appendChild(title);
+      item.appendChild(meta);
+
+      if (inv.dueAt) {
+        const due = document.createElement('div');
+        due.className = 'session-preview';
+        due.textContent = `Termin: ${new Date(inv.dueAt).toLocaleDateString('pl-PL')}`;
+        item.appendChild(due);
+      }
+
+      frag.appendChild(item);
     }
 
     listEl.innerHTML = '';

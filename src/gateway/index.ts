@@ -229,6 +229,8 @@ export async function createGateway(config: Config): Promise<AppGateway> {
               + 'Terminy i dokumenty:\n'
               + '  /terminy - Nadchodzace terminy\n'
               + '  /dokumenty - Szkice do sprawdzenia\n\n'
+              + 'Faktury:\n'
+              + '  /faktury - Lista faktur\n\n'
               + 'Wyszukiwanie:\n'
               + '  /szukaj <fraza> - Szukaj w kodeksach\n'
               + '  /art <nr> <kodeks> - Wyszukaj artykul (np. /art 415 KC)\n\n'
@@ -359,6 +361,22 @@ export async function createGateway(config: Config): Promise<AppGateway> {
             }
             const loc = [article.chapter, article.section].filter(Boolean).join(' > ');
             await ctx.reply(`Art. ${article.articleNumber} ${article.codeName}${loc ? ` (${loc})` : ''}\n\n${article.content}`);
+          });
+
+          // /faktury — list invoices
+          telegramBot.command('faktury', async (ctx: any) => {
+            if (!checkTgAuth(ctx)) return;
+            const invoices = db.listInvoices();
+            if (invoices.length === 0) {
+              await ctx.reply('Brak faktur. Napisz "Utworz fakture" w czacie aby dodac.');
+              return;
+            }
+            const statusLabels: Record<string, string> = { szkic: 'Szkic', wystawiona: 'Wystawiona', oplacona: 'Oplacona', zalegla: 'Zalegla' };
+            const lines = invoices.slice(0, 15).map((inv: any) => {
+              const status = statusLabels[inv.status] ?? inv.status;
+              return `${inv.number}: ${inv.amount} ${inv.currency} [${status}]`;
+            });
+            await ctx.reply(`Faktury (${invoices.length}):\n\n${lines.join('\n')}`);
           });
 
           // Generic text messages — forward to agent

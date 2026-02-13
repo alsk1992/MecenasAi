@@ -132,13 +132,15 @@ Dostępne narzędzia:
 - create_client, list_clients, get_client, update_client, delete_client — zarządzanie klientami
 - create_case, list_cases, get_case, update_case, search_cases, delete_case — zarządzanie sprawami
 - add_deadline, list_deadlines, update_deadline, delete_deadline — terminy
-- draft_document, list_documents, get_document, delete_document — pisma procesowe
+- draft_document, list_documents, get_document, delete_document, list_document_versions — pisma procesowe
+- get_case_timeline — chronologiczna oś czasu sprawy
 - search_law, lookup_article — wyszukiwanie przepisów
 - add_case_note — notatki do spraw
 - set_active_case — ustaw aktywną sprawę (kontekst dla sesji)
 - clear_active_case — wyczyść aktywną sprawę
 - log_time, list_time_entries — śledzenie czasu pracy
 - generate_billing_summary — podsumowanie rozliczeniowe
+- create_invoice, list_invoices, get_invoice, update_invoice — faktury
 - save_template, list_templates, use_template — biblioteka szablonów dokumentów
 
 Bądź konkretny, profesjonalny i pomocny. Jeśli czegoś nie wiesz, powiedz to wprost.`;
@@ -543,6 +545,27 @@ const TOOLS: ToolDef[] = [
     },
   },
   {
+    name: 'list_document_versions',
+    description: 'Pokaż historię wersji dokumentu (poprzednie wersje i aktualną)',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'ID dokumentu' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'get_case_timeline',
+    description: 'Chronologiczna oś czasu sprawy: dokumenty, terminy, notatki, wpisy czasu',
+    input_schema: {
+      type: 'object',
+      properties: {
+        case_id: { type: 'string', description: 'ID sprawy (opcjonalnie — używa aktywnej sprawy)' },
+      },
+    },
+  },
+  {
     name: 'delete_deadline',
     description: 'Usuń termin',
     input_schema: {
@@ -587,6 +610,61 @@ const TOOLS: ToolDef[] = [
       type: 'object',
       properties: {
         id: { type: 'string', description: 'ID sprawy' },
+      },
+      required: ['id'],
+    },
+  },
+  // ── Invoices ──
+  {
+    name: 'create_invoice',
+    description: 'Utwórz fakturę dla klienta. Oblicz kwotę z wpisów czasu lub podaj ręcznie.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        client_id: { type: 'string', description: 'ID klienta' },
+        case_id: { type: 'string', description: 'ID sprawy (opcjonalnie)' },
+        number: { type: 'string', description: 'Numer faktury, np. FV/2026/001' },
+        amount: { type: 'number', description: 'Kwota netto w PLN' },
+        currency: { type: 'string', description: 'Waluta (domyślnie PLN)', default: 'PLN' },
+        due_days: { type: 'number', description: 'Termin płatności w dniach (domyślnie 14)', default: 14 },
+        notes: { type: 'string', description: 'Uwagi do faktury' },
+      },
+      required: ['client_id', 'number', 'amount'],
+    },
+  },
+  {
+    name: 'list_invoices',
+    description: 'Lista faktur, opcjonalnie filtrowana po kliencie, sprawie lub statusie',
+    input_schema: {
+      type: 'object',
+      properties: {
+        client_id: { type: 'string', description: 'Filtr: ID klienta' },
+        case_id: { type: 'string', description: 'Filtr: ID sprawy' },
+        status: { type: 'string', enum: ['szkic', 'wystawiona', 'oplacona', 'zalegla'], description: 'Filtr: status' },
+      },
+    },
+  },
+  {
+    name: 'get_invoice',
+    description: 'Pobierz szczegóły faktury po ID',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'ID faktury' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'update_invoice',
+    description: 'Aktualizuj status faktury (np. wystawiona → opłacona)',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'ID faktury' },
+        status: { type: 'string', enum: ['szkic', 'wystawiona', 'oplacona', 'zalegla'], description: 'Nowy status' },
+        amount: { type: 'number', description: 'Nowa kwota' },
+        notes: { type: 'string', description: 'Uwagi' },
       },
       required: ['id'],
     },
@@ -1003,6 +1081,70 @@ function executeTool(name: string, input: Record<string, unknown>, db: Database,
           lineItems,
         });
       }
+      // ===== INVOICES =====
+      case 'create_invoice': {
+        const invClientId = requireString(input, 'client_id');
+        if (!invClientId) return JSON.stringify({ error: 'ID klienta jest wymagane.' });
+        if (!db.getClient(invClientId)) return JSON.stringify({ error: 'Klient nie znaleziony.' });
+        const invNumber = requireString(input, 'number');
+        if (!invNumber) return JSON.stringify({ error: 'Numer faktury jest wymagany.' });
+        const invAmount = input.amount as number;
+        if (typeof invAmount !== 'number' || !Number.isFinite(invAmount) || invAmount < 0) {
+          return JSON.stringify({ error: 'Kwota musi być liczbą >= 0.' });
+        }
+        const invCaseId = optString(input, 'case_id');
+        if (invCaseId && !db.getCase(invCaseId)) return JSON.stringify({ error: 'Sprawa nie znaleziona.' });
+        const dueDays = optNumber(input, 'due_days', 1, 365) ?? 14;
+        const issuedAt = new Date();
+        const dueAt = new Date(issuedAt.getTime() + dueDays * 24 * 60 * 60 * 1000);
+        const invoice = db.createInvoice({
+          clientId: invClientId,
+          caseId: invCaseId,
+          number: invNumber,
+          amount: invAmount,
+          currency: (optString(input, 'currency') ?? 'PLN').toUpperCase(),
+          status: 'szkic',
+          issuedAt,
+          dueAt,
+          notes: optString(input, 'notes'),
+        });
+        return JSON.stringify({ success: true, invoice });
+      }
+      case 'list_invoices': {
+        const invoices = db.listInvoices({
+          clientId: optString(input, 'client_id'),
+          caseId: optString(input, 'case_id'),
+          status: optString(input, 'status'),
+        });
+        return JSON.stringify({ count: invoices.length, invoices });
+      }
+      case 'get_invoice': {
+        const gInvId = requireString(input, 'id');
+        if (!gInvId) return JSON.stringify({ error: 'ID faktury jest wymagane.' });
+        const inv = db.getInvoice(gInvId);
+        if (!inv) return JSON.stringify({ error: 'Faktura nie znaleziona.' });
+        return JSON.stringify(inv);
+      }
+      case 'update_invoice': {
+        const uInvId = requireString(input, 'id');
+        if (!uInvId) return JSON.stringify({ error: 'ID faktury jest wymagane.' });
+        const existingInv = db.getInvoice(uInvId);
+        if (!existingInv) return JSON.stringify({ error: 'Faktura nie znaleziona.' });
+        const invUpdates: Record<string, unknown> = {};
+        const newStatus = optString(input, 'status');
+        if (newStatus) {
+          const VALID_INV_STATUSES = ['szkic', 'wystawiona', 'oplacona', 'zalegla'];
+          if (!VALID_INV_STATUSES.includes(newStatus)) return JSON.stringify({ error: `Status musi być: ${VALID_INV_STATUSES.join(', ')}` });
+          invUpdates.status = newStatus;
+          if (newStatus === 'oplacona') invUpdates.paidAt = new Date();
+        }
+        const newAmount = optNumber(input, 'amount', 0);
+        if (newAmount !== undefined) invUpdates.amount = newAmount;
+        const invNotes = optString(input, 'notes');
+        if (invNotes !== undefined) invUpdates.notes = invNotes;
+        const updated = db.updateInvoice(uInvId, invUpdates as any);
+        return JSON.stringify({ success: true, invoice: updated });
+      }
       // ===== DOCUMENT TEMPLATES =====
       case 'save_template': {
         const tplName = requireString(input, 'name');
@@ -1118,6 +1260,59 @@ function executeTool(name: string, input: Record<string, unknown>, db: Database,
         }
         db.deleteDocument(ddId);
         return JSON.stringify({ success: true, message: `Dokument "${ddDoc.title}" usunięty.` });
+      }
+      case 'list_document_versions': {
+        const dvId = requireString(input, 'id');
+        if (!dvId) return JSON.stringify({ error: 'ID dokumentu jest wymagane.' });
+        const versions = db.getDocumentVersions(dvId);
+        if (versions.length === 0) return JSON.stringify({ error: 'Dokument nie znaleziony.' });
+        return JSON.stringify({
+          count: versions.length,
+          versions: versions.map(v => ({
+            id: v.id, version: v.version, status: v.status,
+            title: v.title, updatedAt: v.updatedAt,
+          })),
+        });
+      }
+      case 'get_case_timeline': {
+        const tlCaseId = resolveCaseId(input, session);
+        if (!tlCaseId) return JSON.stringify({ error: 'Brak ID sprawy. Podaj case_id lub ustaw aktywną sprawę.' });
+        const tlCase = db.getCase(tlCaseId);
+        if (!tlCase) return JSON.stringify({ error: 'Sprawa nie znaleziona.' });
+        const docs = db.listDocuments({ caseId: tlCaseId });
+        const deadlines = db.listDeadlines({ caseId: tlCaseId });
+        const timeEntries = db.listTimeEntries(tlCaseId);
+        const invoices = db.listInvoices({ caseId: tlCaseId });
+
+        type TimelineEvent = { date: Date; type: string; description: string };
+        const events: TimelineEvent[] = [];
+
+        events.push({ date: tlCase.createdAt, type: 'utworzenie', description: `Sprawa utworzona: ${tlCase.title}` });
+        for (const d of docs) {
+          events.push({ date: d.createdAt, type: 'dokument', description: `${d.type}: "${d.title}" (${d.status})` });
+        }
+        for (const dl of deadlines) {
+          events.push({ date: dl.date, type: dl.completed ? 'termin_zrealizowany' : 'termin', description: `${dl.type}: ${dl.title}` });
+        }
+        for (const te of timeEntries) {
+          events.push({ date: te.date, type: 'czas_pracy', description: `${te.durationMinutes} min — ${te.description}` });
+        }
+        for (const inv of invoices) {
+          events.push({ date: inv.issuedAt, type: 'faktura', description: `${inv.number}: ${inv.amount} ${inv.currency} (${inv.status})` });
+        }
+
+        events.sort((a, b) => a.date.getTime() - b.date.getTime());
+
+        return JSON.stringify({
+          case: tlCase.title,
+          sygnatura: tlCase.sygnatura,
+          totalEvents: events.length,
+          timeline: events.map(e => ({
+            date: e.date.toLocaleDateString('pl-PL'),
+            type: e.type,
+            description: e.description,
+          })),
+        });
       }
       case 'delete_deadline': {
         const delDlId = requireString(input, 'id');

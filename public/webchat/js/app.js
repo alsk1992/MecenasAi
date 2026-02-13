@@ -7,6 +7,15 @@ import { Sidebar } from './sidebar.js';
 import { Chat } from './chat.js';
 import { CommandPalette } from './commands.js';
 
+/** Announce to screen readers via aria-live regions */
+function srAnnounce(text, urgent = false) {
+  const el = document.getElementById(urgent ? 'sr-alerts' : 'sr-status');
+  if (!el) return;
+  el.textContent = '';
+  // Force reannounce by clearing then setting
+  requestAnimationFrame(() => { el.textContent = text; });
+}
+
 class App {
   constructor() {
     this.ws = new WSClient();
@@ -97,6 +106,11 @@ class App {
     this.sidebar.onNewDeadline = () => {
       const inputEl = document.getElementById('input');
       inputEl.value = 'Dodaj nowy termin';
+      inputEl.focus();
+    };
+    this.sidebar.onNewInvoice = () => {
+      const inputEl = document.getElementById('input');
+      inputEl.value = 'Utwórz nową fakturę';
       inputEl.focus();
     };
 
@@ -394,6 +408,7 @@ class App {
       reconnectBanner?.classList.add('visible');
       this.chat.hideTyping();
       this._setGenerating(false);
+      srAnnounce('Połączenie utracone. Ponowne łączenie...', true);
     });
 
     this.ws.on('message', (msg) => {
@@ -404,6 +419,7 @@ class App {
         statusDot.className = 'status-dot connected';
         statusDot.title = 'Connected';
         reconnectBanner?.classList.remove('visible');
+        srAnnounce('Połączono z serwerem.');
         // Re-fetch messages after reconnect to recover any missed responses
         // Skip if switchSession already loaded history (flag cleared after use)
         if (this.activeSessionId && !this._skipNextRefresh) {
@@ -415,6 +431,7 @@ class App {
       } else if (msg.type === 'message') {
         this._setWelcomeMode(false);
         this.chat.addBotMessage(msg.text, msg.messageId, msg.attachments);
+        srAnnounce('Nowa odpowiedź od Mecenasa.');
         // Refresh sidebar data tabs after bot responds (new docs/cases may have been created)
         if (this.activeSessionId && msg.text) {
           this.sidebar._fetchCases();
@@ -432,6 +449,7 @@ class App {
       } else if (msg.type === 'reminder') {
         // Deadline reminder notification
         this.chat.addMessage(msg.text, 'system');
+        srAnnounce('Przypomnienie o terminie.', true);
         this.sidebar._fetchDeadlines();
         if (document.hidden) {
           this._unreadCount++;

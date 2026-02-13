@@ -261,6 +261,7 @@ export interface Invoice {
   issuedAt: Date;
   dueAt: Date;
   paidAt?: Date;
+  notes?: string;
   createdAt: Date;
 }
 
