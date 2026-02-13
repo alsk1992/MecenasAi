@@ -91,6 +91,13 @@ export function createServer(config: Config, db: Database): HttpServer {
           return;
         }
       }
+      // Enforce field-level string length limits to prevent oversized inputs
+      const MAX_FIELD_LEN = 100_000;
+      for (const [k, v] of Object.entries(data)) {
+        if (typeof v === 'string' && v.length > MAX_FIELD_LEN) {
+          data[k] = v.slice(0, MAX_FIELD_LEN);
+        }
+      }
       cb(data);
     });
   }
@@ -678,6 +685,7 @@ export function createServer(config: Config, db: Database): HttpServer {
       wss = new WebSocketServer({
         server,
         path: '/ws',
+        maxPayload: 1_048_576, // 1MB max WS message
         verifyClient: (info: { req: http.IncomingMessage }) => {
           if (wssCorsOrigins.includes('*')) return true;
           const reqOrigin = info.req.headers.origin ?? '';
@@ -976,7 +984,9 @@ async function generateDocx(doc: { title: string; content: string; type: string;
   const legalCase = doc.caseId ? db.getCase(doc.caseId) : null;
   const client = legalCase ? db.getClient(legalCase.clientId) : null;
   const isDraft = doc.status === 'szkic' || doc.status === 'do_sprawdzenia';
-  const lines = doc.content.split('\n');
+  const MAX_DOCX_LINES = 10_000;
+  const allLines = doc.content.split('\n');
+  const lines = allLines.length > MAX_DOCX_LINES ? allLines.slice(0, MAX_DOCX_LINES) : allLines;
 
   // ===== TITLE PAGE (for formal court documents) =====
   const formalTypes = ['pozew', 'odpowiedz_na_pozew', 'apelacja', 'wezwanie_do_zaplaty', 'wniosek', 'pismo_procesowe'];

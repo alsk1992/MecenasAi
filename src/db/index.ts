@@ -827,7 +827,7 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
       if (filters?.caseId) { sql += ' AND case_id = ?'; params.push(filters.caseId); }
       if (filters?.upcoming) { sql += ' AND date >= ? AND completed = 0'; params.push(now()); }
       if (filters?.completed !== undefined) { sql += ' AND completed = ?'; params.push(filters.completed ? 1 : 0); }
-      sql += ' ORDER BY date ASC';
+      sql += ' ORDER BY date ASC LIMIT 500';
       const rows = sqlDb.exec(sql, bindParams(params));
       if (!rows.length) return [];
       return rows[0].values.map(v => ({

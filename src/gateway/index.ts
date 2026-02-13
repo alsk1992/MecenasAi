@@ -377,6 +377,9 @@ export async function createGateway(config: Config): Promise<AppGateway> {
           });
 
           telegramBot.start();
+          if (!allowedUsers?.length) {
+            logger.warn('Telegram bot started WITHOUT allowedUsers — ALL Telegram users have access! Set TELEGRAM_ALLOWED_USERS to restrict.');
+          }
           logger.info('Telegram bot started');
         } catch (err) {
           logger.warn({ err }, 'Failed to start Telegram bot');
@@ -421,6 +424,9 @@ export async function createGateway(config: Config): Promise<AppGateway> {
         }
       });
 
+      if (config.gateway.auth === 'off') {
+        logger.warn('API authentication is OFF — all endpoints are open! Set MECENAS_AUTH=token and MECENAS_TOKEN to secure.');
+      }
       logger.info({ port: config.gateway.port }, 'Mecenas gateway started');
     },
 
