@@ -1867,6 +1867,75 @@ async function executeTool(name: string, input: Record<string, unknown>, db: Dat
 }
 
 // =============================================================================
+// SMART MODEL ROUTING
+// =============================================================================
+
+/** Classify whether a message needs the full (heavy) model or can use the speed model */
+function isSimpleQuery(text: string): boolean {
+  const lower = text.toLowerCase().trim();
+  const len = lower.length;
+
+  // Very short messages — greetings, confirmations, simple questions
+  if (len < 60) return true;
+
+  // Explicit tool triggers that the speed model handles fine
+  const speedPatterns = [
+    /^(cześć|hej|dzień dobry|witam|siema|hi|hello)/,
+    /^(tak|nie|ok|dobrze|dzięki|dziękuję)/,
+    /ile wynos|oblicz|policz|kalkul/,
+    /opłat[aey]\s+sądow/,
+    /odsetek|odsetki/,
+    /przedawnien/,
+    /wyszukaj.*(firm|krs|ceidg|nip)/,
+    /szukaj.*(orzecz|wyrok)/,
+    /art(ykuł)?\s*\.?\s*\d/,
+    /jaki (jest|są) (termin|status)/,
+    /pokaż (sprawy|klient|termin|faktur|dokument)/,
+    /lista (spraw|klient|termin|faktur|dokument)/,
+  ];
+  for (const pat of speedPatterns) {
+    if (pat.test(lower)) return true;
+  }
+
+  // Complex queries — document drafting, analysis, long instructions
+  const complexPatterns = [
+    /napisz (pozew|apelacj|odpowiedź|pismo|umow|wezwanie|wniosek|opini)/,
+    /przygotuj (projekt|dokument|pismo)/,
+    /przeanalizuj|analiz[auy]/,
+    /sporządź|zredaguj/,
+    /wyjaśnij.{20,}/,   // long explanation requests
+    /porównaj|zestawienie/,
+  ];
+  for (const pat of complexPatterns) {
+    if (pat.test(lower)) return false;
+  }
+
+  // Medium-length messages default to speed model
+  if (len < 200) return true;
+
+  // Long messages go to the full model
+  return false;
+}
+
+/** Check if a model is available in Ollama */
+async function checkOllamaModel(ollamaUrl: string, model: string): Promise<boolean> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5_000);
+    const resp = await fetch(`${ollamaUrl}/api/tags`, {
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (!resp.ok) return false;
+    const data = await resp.json() as { models?: Array<{ name: string }> };
+    const models = data.models ?? [];
+    return models.some(m => m.name === model || m.name.startsWith(model.split(':')[0]));
+  } catch {
+    return false;
+  }
+}
+
+// =============================================================================
 // AGENT
 // =============================================================================
 
@@ -1875,17 +1944,55 @@ export interface Agent {
 }
 
 export function createAgent(config: Config, db: Database): Agent {
+  let speedModelAvailable: boolean | null = null; // null = not yet checked
+  const speedModel = config.agent.speedModel;
+
   return {
     async handleMessage(text: string, session: Session): Promise<string | null> {
+      // If using Anthropic as primary, skip model routing
       if (config.agent.provider === 'anthropic' && config.agent.anthropicKey) {
         return handleWithAnthropic(text, session, config, db);
       }
-      // Ollama primary — fall back to Anthropic if Ollama fails and key is available
+
+      // Check speed model availability once
+      if (speedModelAvailable === null && speedModel) {
+        speedModelAvailable = await checkOllamaModel(config.agent.ollamaUrl, speedModel);
+        if (speedModelAvailable) {
+          logger.info({ speedModel }, 'Speed model dostępny — routing aktywny');
+        } else {
+          logger.info({ speedModel }, 'Speed model niedostępny — użyj: ollama pull ' + speedModel);
+        }
+      }
+
+      // Route to speed model for simple queries
+      const useSpeed = speedModelAvailable && speedModel && isSimpleQuery(text);
+      const modelToUse = useSpeed ? speedModel : config.agent.model;
+
+      if (useSpeed) {
+        logger.debug({ model: modelToUse }, 'Routing → speed model');
+      }
+
       try {
-        return await handleWithOllama(text, session, config, db);
+        return await handleWithOllama(text, session, config, db, modelToUse);
       } catch (err) {
         const msg = err instanceof Error ? err.message : '';
         const isOllamaDown = msg.includes('nie jest uruchomiony') || msg.includes('nie odpowiedział') || msg.includes('Nie można połączyć');
+
+        // If speed model failed, retry with main model
+        if (useSpeed && !isOllamaDown) {
+          logger.warn({ err: msg }, 'Speed model błąd — przełączam na główny model');
+          try {
+            return await handleWithOllama(text, session, config, db, config.agent.model);
+          } catch (retryErr) {
+            const retryMsg = retryErr instanceof Error ? retryErr.message : '';
+            if (config.agent.anthropicKey) {
+              logger.warn({ err: retryMsg }, 'Ollama niedostępna — przełączam na Anthropic');
+              return handleWithAnthropic(text, session, config, db);
+            }
+            throw retryErr;
+          }
+        }
+
         if (isOllamaDown && config.agent.anthropicKey) {
           logger.warn({ err: msg }, 'Ollama niedostępna — przełączam na Anthropic');
           return handleWithAnthropic(text, session, config, db);
@@ -1979,9 +2086,11 @@ async function handleWithOllama(
   _text: string,
   session: Session,
   config: Config,
-  db: Database
+  db: Database,
+  modelOverride?: string
 ): Promise<string | null> {
   const ollamaUrl = config.agent.ollamaUrl;
+  const model = modelOverride ?? config.agent.model;
 
   const conversationHistory = (session.messages ?? []).slice(-20).map(msg => ({
     role: msg.role,
@@ -2002,7 +2111,7 @@ ${toolDescriptions}
 
 Jeśli nie musisz używać narzędzia, odpowiedz normalnym tekstem.`;
 
-  let response = await callOllama(ollamaUrl, config.agent.model, systemWithTools, conversationHistory, config.agent.temperature, config.agent.maxTokens);
+  let response = await callOllama(ollamaUrl, model, systemWithTools, conversationHistory, config.agent.temperature, config.agent.maxTokens);
 
   let turns = 0;
   while (turns < 10) {
@@ -2010,13 +2119,13 @@ Jeśli nie musisz używać narzędzia, odpowiedz normalnym tekstem.`;
     if (!toolCall) break;
 
     turns++;
-    logger.info({ tool: toolCall.tool }, 'Ollama tool call');
+    logger.info({ tool: toolCall.tool, model }, 'Ollama tool call');
     const result = await executeTool(toolCall.tool, toolCall.input, db, session);
 
     conversationHistory.push({ role: 'assistant', content: response });
     conversationHistory.push({ role: 'user', content: `Wynik narzędzia ${toolCall.tool}:\n${result}\n\nTeraz odpowiedz użytkownikowi na podstawie wyniku narzędzia.` });
 
-    response = await callOllama(ollamaUrl, config.agent.model, systemWithTools, conversationHistory, config.agent.temperature, config.agent.maxTokens);
+    response = await callOllama(ollamaUrl, model, systemWithTools, conversationHistory, config.agent.temperature, config.agent.maxTokens);
   }
 
   return response || null;

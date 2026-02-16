@@ -279,6 +279,7 @@ export interface Config {
 
 export interface AgentConfig {
   model: string;
+  speedModel?: string;          // fast local model for simple queries (e.g. gemma3:4b)
   provider: 'ollama' | 'anthropic';
   maxTokens: number;
   temperature: number;

@@ -54,9 +54,14 @@ export function loadConfig(): Config {
   const temperature = fileConfig.agent?.temperature ?? 0.3;
   const maxMessages = fileConfig.session?.maxMessages ?? 50;
 
+  const speedModel = process.env.MECENAS_SPEED_MODEL
+    ?? fileConfig.agent?.speedModel
+    ?? 'gemma3:4b';
+
   const config: Config = {
     agent: {
       model: fileConfig.agent?.model ?? defaultModel,
+      speedModel,
       provider: (fileConfig.agent?.provider ?? defaultProvider) as 'ollama' | 'anthropic',
       maxTokens: Math.max(256, Math.min(fileConfig.agent?.maxTokens ?? 4096, 65536)),
       temperature: Math.max(0, Math.min(Number(temperature) || 0.3, 2)),
