@@ -17,7 +17,11 @@ export type PiiType =
   | 'postal_code'
   | 'case_signature'
   | 'person_name'
-  | 'address';
+  | 'address'
+  | 'iban'
+  | 'id_card'
+  | 'passport'
+  | 'company_name';
 
 export interface PiiMatch {
   type: PiiType;
@@ -40,12 +44,70 @@ const PESEL_WEIGHTS = [1, 3, 7, 9, 1, 3, 7, 9, 1, 3];
 
 function isValidPesel(digits: string): boolean {
   if (digits.length !== 11 || !/^\d{11}$/.test(digits)) return false;
+  // Checksum validation
   let sum = 0;
   for (let i = 0; i < 10; i++) {
     sum += parseInt(digits[i], 10) * PESEL_WEIGHTS[i];
   }
   const checkDigit = (10 - (sum % 10)) % 10;
-  return checkDigit === parseInt(digits[10], 10);
+  if (checkDigit !== parseInt(digits[10], 10)) return false;
+  // Date-of-birth validation: YYMMDD where month encodes century
+  const yy = parseInt(digits.slice(0, 2), 10);
+  const mm = parseInt(digits.slice(2, 4), 10);
+  const dd = parseInt(digits.slice(4, 6), 10);
+  // Month ranges: 01-12 (1900s), 21-32 (2000s), 41-52 (2100s), 61-72 (2200s), 81-92 (1800s)
+  const monthOffset = mm > 80 ? 80 : mm > 60 ? 60 : mm > 40 ? 40 : mm > 20 ? 20 : 0;
+  const realMonth = mm - monthOffset;
+  if (realMonth < 1 || realMonth > 12) return false;
+  if (dd < 1 || dd > 31) return false;
+  // Simple day-in-month check (conservative — allow 29 for Feb)
+  const maxDays = [0, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (dd > maxDays[realMonth]) return false;
+  return true;
+}
+
+// NIP checksum weights
+const NIP_WEIGHTS = [6, 5, 7, 2, 3, 4, 5, 6, 7];
+
+function isValidNip(digits: string): boolean {
+  const clean = digits.replace(/[-\s]/g, '');
+  if (clean.length !== 10 || !/^\d{10}$/.test(clean)) return false;
+  let sum = 0;
+  for (let i = 0; i < 9; i++) {
+    sum += parseInt(clean[i], 10) * NIP_WEIGHTS[i];
+  }
+  const checkDigit = sum % 11;
+  // If checkDigit is 10, NIP is invalid
+  if (checkDigit === 10) return false;
+  return checkDigit === parseInt(clean[9], 10);
+}
+
+// REGON checksum weights (9-digit)
+const REGON9_WEIGHTS = [8, 9, 2, 3, 4, 5, 6, 7];
+// REGON checksum weights (14-digit, for the extra 5 digits)
+const REGON14_WEIGHTS = [2, 4, 8, 5, 0, 9, 7, 3, 6, 1, 2, 4, 8];
+
+function isValidRegon(digits: string): boolean {
+  if (!/^\d+$/.test(digits)) return false;
+  if (digits.length === 9) {
+    let sum = 0;
+    for (let i = 0; i < 8; i++) {
+      sum += parseInt(digits[i], 10) * REGON9_WEIGHTS[i];
+    }
+    const checkDigit = sum % 11 === 10 ? 0 : sum % 11;
+    return checkDigit === parseInt(digits[8], 10);
+  }
+  if (digits.length === 14) {
+    // First validate the 9-digit base
+    if (!isValidRegon(digits.slice(0, 9))) return false;
+    let sum = 0;
+    for (let i = 0; i < 13; i++) {
+      sum += parseInt(digits[i], 10) * REGON14_WEIGHTS[i];
+    }
+    const checkDigit = sum % 11 === 10 ? 0 : sum % 11;
+    return checkDigit === parseInt(digits[13], 10);
+  }
+  return false;
 }
 
 // =============================================================================
@@ -74,7 +136,23 @@ const POSTAL_CODE_RE = /\b(\d{2}-\d{3})\b/g;
 const CASE_SIGNATURE_RE = /\b(X{0,3}(?:IX|IV|V?I{0,3})\s+[A-Z][a-z]{0,4}\s+\d{1,6}\/\d{2,4})\b/g;
 
 // Polish names after legal keywords (Klient:, Powód:, Pozwany:, Pełnomocnik:, etc.)
-const NAME_AFTER_KEYWORD_RE = /(?:Klient|Powód|Pozwany|Pełnomocnik|Wnioskodawca|Uczestnik|Dłużnik|Wierzyciel|Spadkodawca|Spadkobierca|Obwiniony|Oskarżony|Pokrzywdzony)\s*:\s*([A-ZŁŚŹŻĆŃ][a-złóśćźżęąń]+(?:\s+[A-ZŁŚŹŻĆŃ][a-złóśćźżęąń]+){1,3})/g;
+// Case-insensitive to catch "klient:", "KLIENT:", etc.
+const NAME_AFTER_KEYWORD_RE = /(?:Klient|Powód|Pozwany|Pełnomocnik|Wnioskodawca|Uczestnik|Dłużnik|Wierzyciel|Spadkodawca|Spadkobierca|Obwiniony|Oskarżony|Pokrzywdzony)\s*:\s*([A-ZŁŚŹŻĆŃ][a-złóśćźżęąń]+(?:\s+[A-ZŁŚŹŻĆŃ][a-złóśćźżęąń]+){1,3})/gi;
+
+// Polish IBAN: PL followed by 26 digits (with optional spaces/dashes)
+const IBAN_RE = /\bPL\s?(\d{2}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4})\b/g;
+
+// Polish ID card (dowód osobisty): 3 letters + 6 digits
+const ID_CARD_RE = /\b([A-Z]{3}\d{6})\b/g;
+
+// Polish passport: 2 letters + 7 digits
+const PASSPORT_RE = /\b([A-Z]{2}\d{7})\b/g;
+
+// Street addresses: ul./al./pl. followed by text
+const ADDRESS_RE = /(?:ul\.|al\.|pl\.|os\.|ulica|aleja)\s+[A-ZŁŚŹŻĆŃ][a-złóśćźżęąń]+(?:\s+[A-ZŁŚŹŻĆŃ]?[a-złóśćźżęąń]+)*\s+\d+[a-zA-Z]?(?:\/\d+[a-zA-Z]?)?/gi;
+
+// Company names with Polish legal suffixes
+const COMPANY_NAME_RE = /\b[A-ZŁŚŹŻĆŃ][a-złóśćźżęąń]+(?:\s+[A-ZŁŚŹŻĆŃa-złóśćźżęąń]+)*\s+(?:sp\.\s*z\s*o\.?\s*o\.?|S\.?A\.?|sp\.\s*j\.?|sp\.\s*k\.?|sp\.\s*p\.?|s\.?\s*c\.?)\b/g;
 
 // =============================================================================
 // SENSITIVE KEYWORDS (Polish legal terms indicating PII context)
@@ -126,18 +204,17 @@ export function detectPii(text: string): DetectionResult {
     }
   }
 
-  // --- NIP ---
+  // --- NIP (with checksum validation) ---
   for (const m of text.matchAll(NIP_RE)) {
-    const clean = m[1].replace(/[-\s]/g, '');
-    if (clean.length === 10) {
+    if (isValidNip(m[1])) {
       matches.push({ type: 'nip', value: m[0], index: m.index! });
     }
   }
 
-  // --- REGON (only if not already matched as PESEL) ---
+  // --- REGON (with checksum validation, skip positions already matched as PESEL) ---
   const peselPositions = new Set(matches.filter(p => p.type === 'pesel').map(p => p.index));
   for (const m of text.matchAll(REGON_RE)) {
-    if (!peselPositions.has(m.index!)) {
+    if (!peselPositions.has(m.index!) && isValidRegon(m[1])) {
       matches.push({ type: 'regon', value: m[1], index: m.index! });
     }
   }
@@ -167,6 +244,31 @@ export function detectPii(text: string): DetectionResult {
     matches.push({ type: 'person_name', value: m[1].trim(), index: m.index! + m[0].indexOf(m[1]) });
   }
 
+  // --- IBAN ---
+  for (const m of text.matchAll(IBAN_RE)) {
+    matches.push({ type: 'iban', value: m[0], index: m.index! });
+  }
+
+  // --- Polish ID card (dowód osobisty) ---
+  for (const m of text.matchAll(ID_CARD_RE)) {
+    matches.push({ type: 'id_card', value: m[1], index: m.index! });
+  }
+
+  // --- Passport ---
+  for (const m of text.matchAll(PASSPORT_RE)) {
+    matches.push({ type: 'passport', value: m[1], index: m.index! });
+  }
+
+  // --- Street addresses ---
+  for (const m of text.matchAll(ADDRESS_RE)) {
+    matches.push({ type: 'address', value: m[0], index: m.index! });
+  }
+
+  // --- Company names with legal suffixes ---
+  for (const m of text.matchAll(COMPANY_NAME_RE)) {
+    matches.push({ type: 'company_name', value: m[0], index: m.index! });
+  }
+
   // --- Sensitive keywords ---
   const lower = text.toLowerCase();
   for (const kw of SENSITIVE_KEYWORDS) {
@@ -185,9 +287,32 @@ export function detectPii(text: string): DetectionResult {
 
 /**
  * Quick check: does text contain any PII or sensitive keywords?
- * Faster than full detectPii() when you only need a boolean.
+ * Uses early-exit checks before full regex scan for performance.
  */
 export function containsSensitiveData(text: string): boolean {
-  const result = detectPii(text);
-  return result.hasPii || result.hasSensitiveKeywords;
+  if (!text) return false;
+
+  // Fast path: check sensitive keywords first (cheap string search)
+  const lower = text.toLowerCase();
+  for (const kw of SENSITIVE_KEYWORDS) {
+    if (lower.includes(kw)) return true;
+  }
+
+  // Quick regex checks (most common patterns, test-only for early exit)
+  if (PESEL_RE.test(text)) { PESEL_RE.lastIndex = 0; return true; }
+  PESEL_RE.lastIndex = 0;
+  if (NIP_RE.test(text)) { NIP_RE.lastIndex = 0; return true; }
+  NIP_RE.lastIndex = 0;
+  if (PHONE_RE.test(text)) { PHONE_RE.lastIndex = 0; return true; }
+  PHONE_RE.lastIndex = 0;
+  if (EMAIL_RE.test(text)) { EMAIL_RE.lastIndex = 0; return true; }
+  EMAIL_RE.lastIndex = 0;
+  if (IBAN_RE.test(text)) { IBAN_RE.lastIndex = 0; return true; }
+  IBAN_RE.lastIndex = 0;
+  if (NAME_AFTER_KEYWORD_RE.test(text)) { NAME_AFTER_KEYWORD_RE.lastIndex = 0; return true; }
+  NAME_AFTER_KEYWORD_RE.lastIndex = 0;
+  if (ID_CARD_RE.test(text)) { ID_CARD_RE.lastIndex = 0; return true; }
+  ID_CARD_RE.lastIndex = 0;
+
+  return false;
 }

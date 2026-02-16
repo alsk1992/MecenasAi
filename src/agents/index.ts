@@ -1973,9 +1973,9 @@ function classifyPrivacy(
     }
   }
 
-  // Scan last 10 conversation messages for PII
+  // Scan last 20 conversation messages for PII (must match Anthropic context window)
   if (!hasPii) {
-    const recentMessages = (session.messages ?? []).slice(-10);
+    const recentMessages = (session.messages ?? []).slice(-20);
     for (const msg of recentMessages) {
       if (containsSensitiveData(msg.content)) {
         hasPii = true;
@@ -2041,7 +2041,8 @@ export function createAgent(config: Config, db: Database): Agent {
             logger.warn({ reason: privacy.reason }, 'Wykryto dane wrażliwe — Ollama niedostępna, blokuję przekazanie do chmury');
             return '⚠️ **Ochrona prywatności**: Wykryto dane osobowe (PESEL, NIP, dane klienta) w wiadomości lub kontekście aktywnej sprawy. Lokalny model AI (Ollama) jest niedostępny. Ze względu na ochronę tajemnicy adwokackiej nie mogę przekazać tych danych do zewnętrznego serwera. Uruchom Ollama (`ollama serve`) lub wyłącz kontekst aktywnej sprawy (`/clear`).';
           }
-          // blockCloudOnPii=false → fall through to cloud with anonymization
+          // blockCloudOnPii=false → fall through to cloud, but FORCE anonymization
+          logger.warn({ reason: privacy.reason }, 'blockCloudOnPii=false — wymuszam anonimizację przed wysłaniem do chmury');
         } else {
           // Ollama is up — route locally
           if (privacy.reason === 'pii_detected' || privacy.reason === 'strict_mode') {
@@ -2075,10 +2076,12 @@ export function createAgent(config: Config, db: Database): Agent {
       }
 
       // --- Cloud path (no PII, or privacy=off, or blockCloudOnPii=false) ---
+      // forceAnonymize when PII was detected but cloud is allowed (blockCloudOnPii=false fallthrough)
+      const piiDetectedForCloud = privacy.reason === 'pii_detected' || privacy.reason === 'strict_mode';
 
       // If using Anthropic as primary, skip Ollama
       if (config.agent.provider === 'anthropic' && config.agent.anthropicKey) {
-        return handleWithAnthropic(text, session, config, db);
+        return handleWithAnthropic(text, session, config, db, piiDetectedForCloud);
       }
 
       // Check speed model availability once
@@ -2114,7 +2117,7 @@ export function createAgent(config: Config, db: Database): Agent {
             const retryMsg = retryErr instanceof Error ? retryErr.message : '';
             if (config.agent.anthropicKey) {
               logger.warn({ err: retryMsg }, 'Ollama niedostępna — przełączam na Anthropic');
-              return handleWithAnthropic(text, session, config, db);
+              return handleWithAnthropic(text, session, config, db, piiDetectedForCloud);
             }
             throw retryErr;
           }
@@ -2122,7 +2125,7 @@ export function createAgent(config: Config, db: Database): Agent {
 
         if (isOllamaDown && config.agent.anthropicKey) {
           logger.warn({ err: msg }, 'Ollama niedostępna — przełączam na Anthropic');
-          return handleWithAnthropic(text, session, config, db);
+          return handleWithAnthropic(text, session, config, db, piiDetectedForCloud);
         }
         throw err;
       }
@@ -2138,17 +2141,22 @@ async function handleWithAnthropic(
   _text: string,
   session: Session,
   config: Config,
-  db: Database
+  db: Database,
+  forceAnonymize = false
 ): Promise<string | null> {
   const client = new Anthropic({ apiKey: config.agent.anthropicKey });
 
+  // --- Privacy: resolve effective mode (per-session override → global config) ---
+  const effectivePrivacyMode = (session.metadata?.privacyMode as string) ?? config.privacy.mode;
+
   // --- Privacy: create per-request anonymizer ---
-  const shouldAnonymize = config.privacy.mode !== 'off' && config.privacy.anonymizeForCloud;
+  // forceAnonymize=true when PII was detected but blockCloudOnPii=false (must protect regardless)
+  const shouldAnonymize = forceAnonymize || (effectivePrivacyMode !== 'off' && config.privacy.anonymizeForCloud);
   const anonymizer = shouldAnonymize ? new Anonymizer() : null;
 
   // --- Build system prompt (strip active case context for cloud if configured) ---
   let systemPrompt: string;
-  if (config.privacy.mode !== 'off' && config.privacy.stripActiveCaseForCloud) {
+  if (effectivePrivacyMode !== 'off' && config.privacy.stripActiveCaseForCloud) {
     // Use base prompt only — no active case context to prevent client PII leaking
     systemPrompt = SYSTEM_PROMPT;
   } else {
@@ -2206,7 +2214,14 @@ async function handleWithAnthropic(
           const deAnon = anonymizer.deanonymize(rawJson);
           try { toolInput = JSON.parse(deAnon); } catch { /* use original */ }
         }
-        const result = await executeTool(block.name, toolInput, db, session);
+        let result: string;
+        try {
+          result = await executeTool(block.name, toolInput, db, session);
+        } catch (toolErr) {
+          // Sanitize error message — may contain PII from DB operations
+          const safeMsg = toolErr instanceof Error ? toolErr.message.slice(0, 200) : 'Nieznany błąd';
+          result = JSON.stringify({ error: anonymizer ? anonymizer.anonymize(safeMsg) : safeMsg });
+        }
         // Re-anonymize tool result before sending back to cloud
         const anonResult = anonymizer ? anonymizer.anonymize(result) : result;
         toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: anonResult });
@@ -2219,7 +2234,7 @@ async function handleWithAnthropic(
     messages.push({ role: 'user', content: toolResults as any });
 
     // Re-build system prompt (still stripped for cloud)
-    const loopSystemPrompt = (config.privacy.mode !== 'off' && config.privacy.stripActiveCaseForCloud)
+    const loopSystemPrompt = (effectivePrivacyMode !== 'off' && config.privacy.stripActiveCaseForCloud)
       ? SYSTEM_PROMPT
       : buildSystemPrompt(session, db);
     const anonLoopSystem = anonymizer ? anonymizer.anonymize(loopSystemPrompt) : loopSystemPrompt;

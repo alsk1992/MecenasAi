@@ -20,12 +20,28 @@ const PLACEHOLDER_LABELS: Record<PiiType, string> = {
   case_signature: 'SYGN',
   person_name: 'OSOBA',
   address: 'ADRES',
+  iban: 'IBAN',
+  id_card: 'DOWOD',
+  passport: 'PASZPORT',
+  company_name: 'FIRMA',
 };
 
 // =============================================================================
 // ANONYMIZER CLASS
 // =============================================================================
 
+/**
+ * Per-request bidirectional PII anonymizer.
+ *
+ * IMPORTANT — SESSION ISOLATION:
+ * Create a NEW Anonymizer instance for each request/message.
+ * Never share an instance across sessions or users — doing so would
+ * leak PII mappings between different lawyer sessions.
+ *
+ * The stateful design (forward/reverse maps) is intentional within a single
+ * request to maintain consistent placeholder mapping across system prompt,
+ * user messages, tool inputs, tool results, and final response.
+ */
 export class Anonymizer {
   /** original → placeholder */
   private readonly forward = new Map<string, string>();
@@ -86,17 +102,41 @@ export class Anonymizer {
   // Internal
   // ---------------------------------------------------------------------------
 
+  /** Normalize PII values for consistent mapping (e.g. NIP with/without dashes → same placeholder) */
+  private normalizeValue(type: PiiType, value: string): string {
+    if (type === 'nip' || type === 'regon' || type === 'pesel' || type === 'phone' || type === 'iban') {
+      return value.replace(/[-\s]/g, '');
+    }
+    if (type === 'person_name' || type === 'company_name') {
+      return value.trim();
+    }
+    return value;
+  }
+
   private getOrCreatePlaceholder(type: PiiType, value: string): string {
-    const existing = this.forward.get(value);
-    if (existing) return existing;
+    // Check both raw and normalized forms
+    const normalized = this.normalizeValue(type, value);
+    const existing = this.forward.get(value) ?? this.forward.get(normalized);
+    if (existing) {
+      // Also register the original form for this placeholder
+      if (!this.forward.has(value)) {
+        this.forward.set(value, existing);
+        this.reverse.set(existing, value);
+      }
+      return existing;
+    }
 
     const count = (this.counters.get(type) ?? 0) + 1;
     this.counters.set(type, count);
 
     const label = PLACEHOLDER_LABELS[type];
-    const placeholder = `[${label}_${count}]`;
+    const placeholder = `<<MECENAS_${label}_${count}>>`;
 
     this.forward.set(value, placeholder);
+    // Also store the normalized form for cross-lookup
+    if (normalized !== value) {
+      this.forward.set(normalized, placeholder);
+    }
     this.reverse.set(placeholder, value);
 
     return placeholder;

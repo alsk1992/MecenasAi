@@ -1021,6 +1021,7 @@ export function createServer(config: Config, db: Database): HttpServer {
             type: 'authenticated',
             chatId,
             message: 'Witaj w Mecenasie! Jestem Twoim asystentem prawnym AI.',
+            privacyMode: config.privacy.mode,
           }));
         }
 
@@ -1047,6 +1048,7 @@ export function createServer(config: Config, db: Database): HttpServer {
                   type: 'authenticated',
                   chatId,
                   message: 'Witaj w Mecenasie! Jestem Twoim asystentem prawnym AI.',
+                  privacyMode: config.privacy.mode,
                 }));
               }
               return;
@@ -1096,10 +1098,19 @@ export function createServer(config: Config, db: Database): HttpServer {
 
             // Privacy mode toggle (stored in session metadata)
             if (msg.type === 'privacy_mode') {
-              const mode = String(msg.mode ?? '').trim();
+              let mode = String(msg.mode ?? '').trim();
               if (!['auto', 'strict', 'off'].includes(mode)) {
                 ws.send(JSON.stringify({ type: 'error', message: 'Tryb prywatności musi być: auto, strict lub off.' }));
                 return;
+              }
+              // Server-side enforcement: session mode cannot be less restrictive than global config
+              // Restrictiveness order: strict > auto > off
+              const RESTRICTIVENESS: Record<string, number> = { strict: 2, auto: 1, off: 0 };
+              const globalLevel = RESTRICTIVENESS[config.privacy.mode] ?? 1;
+              const requestedLevel = RESTRICTIVENESS[mode] ?? 1;
+              if (requestedLevel < globalLevel) {
+                mode = config.privacy.mode; // enforce floor
+                ws.send(JSON.stringify({ type: 'error', message: `Tryb prywatności nie może być mniej restrykcyjny niż ustawienie globalne (${config.privacy.mode}).` }));
               }
               // Store in per-connection metadata — onWebChatMessage will pick it up via session
               (ws as any)._privacyMode = mode;

@@ -59,7 +59,7 @@ export function loadConfig(): Config {
     ?? 'gemma3:4b';
 
   // Privacy config
-  const privacyModeRaw = process.env.MECENAS_PRIVACY_MODE ?? (fileConfig.privacy as any)?.mode ?? 'auto';
+  const privacyModeRaw = (process.env.MECENAS_PRIVACY_MODE?.trim()) ?? (fileConfig.privacy as any)?.mode ?? 'auto';
   const privacyMode = (['auto', 'strict', 'off'].includes(privacyModeRaw) ? privacyModeRaw : 'auto') as 'auto' | 'strict' | 'off';
 
   const config: Config = {
