@@ -17,8 +17,9 @@ npm start         # http://localhost:18789/webchat
 Requires Ollama with Bielik **or** an Anthropic API key:
 
 ```bash
-# Option A: Ollama (local, private)
+# Option A: Ollama (local, private — recommended)
 ollama pull SpeakLeash/bielik-11b-v2.2-instruct:Q4_K_M
+ollama pull gemma3:4b              # optional speed model for fast responses
 export OLLAMA_URL=http://localhost:11434
 
 # Option B: Claude (cloud)
@@ -38,10 +39,15 @@ export ANTHROPIC_API_KEY=sk-ant-...
 | **DOCX Export** | Professional formatting — Times New Roman, headers, page numbers, draft watermark |
 | **Document Workflow** | Draft → Review → Approved → Filed |
 | **Channels** | Built-in WebChat + Telegram bot |
-| **LLM** | Bielik 11B (Ollama, local) or Claude (Anthropic, cloud) |
+| **Smart Model Routing** | Gemma 3 4B for fast queries + Bielik 11B for complex legal work — auto-routed |
+| **LLM** | Bielik 11B (Ollama, local) or Claude (Anthropic, cloud) — Gemma 3 4B speed tier |
+| **Legal Calculators** | Court fees, statutory interest, limitation periods (przedawnienie) |
+| **Court Decisions** | Search 400K+ Polish court decisions via SAOS API |
+| **Company Lookup** | KRS + CEIDG company registry search |
+| **Document Upload** | PDF, DOCX, TXT — extract text and analyze with AI |
 | **Database** | SQLite (sql.js WASM) — fully private, data stays on your machine |
 
-### 13 AI Tools
+### 19 AI Tools
 
 - `create_client`, `list_clients`, `get_client` — client management
 - `create_case`, `list_cases`, `get_case`, `update_case` — case management
@@ -49,6 +55,12 @@ export ANTHROPIC_API_KEY=sk-ant-...
 - `draft_document`, `list_documents`, `get_document` — document drafting
 - `search_law`, `lookup_article` — legal code search
 - `add_case_note` — case notes
+- `calculate_court_fee` — court fee calculator (ustawa o kosztach sądowych)
+- `calculate_interest` — statutory interest calculator (ustawowe, za opóźnienie, handlowe)
+- `calculate_limitation` — przedawnienie (statute of limitations) calculator
+- `search_court_decisions` — search SAOS database (400K+ Polish court decisions)
+- `lookup_company` — KRS/CEIDG company registry lookup
+- `get_uploaded_document` — retrieve uploaded document text for AI analysis
 
 ---
 
@@ -89,6 +101,10 @@ npm run ingest
 | `/api/clients` | GET | List clients |
 | `/api/knowledge/search?q=` | GET | Search legal codes |
 | `/api/knowledge/stats` | GET | Knowledge base stats |
+| `/api/calc/court-fee?amount=&type=` | GET | Court fee calculator |
+| `/api/calc/interest?principal=&from=&to=&type=` | GET | Interest calculator |
+| `/api/calc/limitation?type=&from=` | GET | Limitation period calculator |
+| `/api/documents/upload` | POST | Upload PDF/DOCX/TXT for analysis |
 
 ---
 
@@ -99,8 +115,9 @@ npm run ingest
 OLLAMA_URL=http://localhost:11434        # Bielik locally
 ANTHROPIC_API_KEY=sk-ant-...             # Claude in the cloud
 
-# Model (optional)
-MECENAS_MODEL=SpeakLeash/bielik-11b-v2.2-instruct:Q4_K_M
+# Models (optional overrides)
+MECENAS_MODEL=SpeakLeash/bielik-11b-v2.2-instruct:Q4_K_M   # main model
+MECENAS_SPEED_MODEL=gemma3:4b            # fast model for simple queries
 
 # Server
 PORT=18789
@@ -113,6 +130,21 @@ TELEGRAM_ALLOWED_USERS=123456789
 
 Data stored in `~/.mecenas/` (SQLite, auto-created on first run).
 
+### Multi-Model Routing
+
+Mecenas automatically routes queries to the right model:
+
+| Query Type | Model | Speed |
+|------------|-------|-------|
+| Greetings, confirmations, simple lookups | Gemma 3 4B | ~2-3x faster |
+| Calculator triggers (fees, interest, limitation) | Gemma 3 4B | ~2-3x faster |
+| Article lookups, case/client lists | Gemma 3 4B | ~2-3x faster |
+| Document drafting (pozwy, apelacje, umowy) | Bielik 11B | Full quality |
+| Legal analysis, long explanations | Bielik 11B | Full quality |
+| Complex multi-step reasoning | Bielik 11B | Full quality |
+
+Fallback chain: **Gemma 3** → **Bielik** → **Claude** (if API key set). If Gemma 3 isn't installed, all queries go to Bielik. Everything runs locally — zero data leaves your machine.
+
 ---
 
 ## Docker
@@ -124,6 +156,7 @@ docker compose up --build
 Ollama starts automatically as a sidecar. After startup:
 ```bash
 docker compose exec ollama ollama pull SpeakLeash/bielik-11b-v2.2-instruct:Q4_K_M
+docker compose exec ollama ollama pull gemma3:4b    # optional speed model
 ```
 
 ---
@@ -133,13 +166,20 @@ docker compose exec ollama ollama pull SpeakLeash/bielik-11b-v2.2-instruct:Q4_K_
 ```
 ┌──────────────────────────────────────────────┐
 │              WebChat + Telegram               │
-│     HTTP • WebSocket • REST API • CORS       │
+│  HTTP • WebSocket • REST API • Calculators   │
 └──────────────────┬───────────────────────────┘
                    │
 ┌──────────────────┴───────────────────────────┐
-│              Agent (13 tools)                 │
-│  Bielik (Ollama) or Claude (Anthropic)       │
-│  Sessions • History • Tool loop              │
+│            Smart Model Router                 │
+│  Simple queries ──→ Gemma 3 4B (fast)        │
+│  Complex legal  ──→ Bielik 11B (quality)     │
+│  Fallback       ──→ Claude (cloud)           │
+└──────────────────┬───────────────────────────┘
+                   │
+┌──────────────────┴───────────────────────────┐
+│             Agent (19 tools)                  │
+│  Cases • Documents • Law search • SAOS       │
+│  Calculators • KRS/CEIDG • Doc upload        │
 └──────────────────┬───────────────────────────┘
                    │
 ┌──────────────────┴───────────────────────────┐
