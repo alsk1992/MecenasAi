@@ -14,6 +14,7 @@ import { generateId } from '../utils/id.js';
 import type { Config, IncomingMessage } from '../types.js';
 import type { Database } from '../db/index.js';
 import { detectPii } from '../privacy/detector.js';
+import { queryAuditLog } from '../privacy/audit.js';
 
 interface WebChatCallbacks {
   onWebChatMessage: (message: IncomingMessage) => Promise<void>;
@@ -119,6 +120,11 @@ export function createServer(config: Config, db: Database): HttpServer {
         res.setHeader('X-Frame-Options', 'DENY');
         res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
         res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; font-src 'self'");
+        res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+        res.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
+        if (config.privacy.hstsEnabled) {
+          res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+        }
 
         // CORS
         const corsOrigins = config.gateway.cors ?? ['*'];
@@ -960,6 +966,22 @@ export function createServer(config: Config, db: Database): HttpServer {
               matchCount: result.matches.length,
             }));
           });
+          return;
+        }
+
+        // ── Privacy Audit Log ──
+        if (pathname === '/api/privacy/audit' && req.method === 'GET') {
+          if (!checkApiAuth(req)) {
+            res.writeHead(401, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Unauthorized' }));
+            return;
+          }
+          const limit = Math.max(1, Math.min(parseInt(url.searchParams.get('limit') ?? '50', 10) || 50, 500));
+          const action = url.searchParams.get('action') ?? undefined;
+          const since = url.searchParams.get('since') ? parseInt(url.searchParams.get('since')!, 10) : undefined;
+          const entries = queryAuditLog({ action: action as any, since, limit });
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ entries, count: entries.length }));
           return;
         }
 

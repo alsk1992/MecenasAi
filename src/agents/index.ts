@@ -10,6 +10,7 @@ import type { Config, Session } from '../types.js';
 import type { Database } from '../db/index.js';
 import { detectPii, containsSensitiveData } from '../privacy/detector.js';
 import { Anonymizer } from '../privacy/anonymizer.js';
+import { logPrivacyEvent } from '../privacy/audit.js';
 
 // =============================================================================
 // SYSTEM PROMPT
@@ -150,6 +151,9 @@ Dostępne narzędzia:
 - search_court_decisions — wyszukiwanie orzeczeń sądowych w bazie SAOS (400K+ orzeczeń)
 - lookup_company — wyszukiwanie firm w KRS i CEIDG (dane rejestrowe, adres, status)
 - get_uploaded_document — pobierz treść przesłanego dokumentu (PDF/DOCX/TXT) do analizy
+- record_ai_consent, check_ai_consent, revoke_ai_consent — zarządzanie zgodą na AI (RODO)
+- gdpr_delete_client — RODO Art. 17 — trwałe usunięcie danych klienta
+- set_case_privacy — ustaw tryb prywatności dla konkretnej sprawy (np. strict dla karnych)
 
 Bądź konkretny, profesjonalny i pomocny. Jeśli czegoś nie wiesz, powiedz to wprost.`;
 
@@ -768,6 +772,62 @@ const TOOLS: ToolDef[] = [
       required: ['id'],
     },
   },
+  // ── Privacy & Compliance ──
+  {
+    name: 'record_ai_consent',
+    description: 'Zarejestruj zgodę na przetwarzanie AI dla sprawy. Wymagane przed użyciem AI do analizy danych klienta (RODO, tajemnica adwokacka).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        caseId: { type: 'string', description: 'ID sprawy' },
+        scope: { type: 'string', enum: ['local_only', 'cloud_anonymized', 'full'], description: 'Zakres zgody (domyślnie: local_only)' },
+        notes: { type: 'string', description: 'Dodatkowe uwagi' },
+      },
+      required: ['caseId'],
+    },
+  },
+  {
+    name: 'check_ai_consent',
+    description: 'Sprawdź czy sprawa ma zarejestrowaną zgodę na AI',
+    input_schema: {
+      type: 'object',
+      properties: { caseId: { type: 'string', description: 'ID sprawy' } },
+      required: ['caseId'],
+    },
+  },
+  {
+    name: 'revoke_ai_consent',
+    description: 'Cofnij zgodę na AI dla sprawy',
+    input_schema: {
+      type: 'object',
+      properties: { caseId: { type: 'string', description: 'ID sprawy' } },
+      required: ['caseId'],
+    },
+  },
+  {
+    name: 'gdpr_delete_client',
+    description: 'RODO Art. 17 — Prawo do usunięcia danych klienta. Trwale kasuje WSZYSTKIE dane: klienta, sprawy, dokumenty, terminy, faktury, wpisy czasu, oraz oczyszcza historię rozmów z danych osobowych. NIEODWRACALNE.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        clientId: { type: 'string', description: 'ID klienta do usunięcia' },
+        confirm: { type: 'boolean', description: 'Potwierdzenie usunięcia (musi być true)' },
+      },
+      required: ['clientId', 'confirm'],
+    },
+  },
+  {
+    name: 'set_case_privacy',
+    description: 'Ustaw tryb prywatności dla konkretnej sprawy (np. strict dla spraw karnych/rodzinnych). Nadpisuje globalne ustawienie dla tej sprawy.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        caseId: { type: 'string', description: 'ID sprawy' },
+        privacyMode: { type: 'string', enum: ['auto', 'strict', 'off'], description: 'Tryb prywatności (strict = tylko lokalny model)' },
+      },
+      required: ['caseId', 'privacyMode'],
+    },
+  },
 ];
 
 // =============================================================================
@@ -993,11 +1053,15 @@ async function executeTool(name: string, input: Record<string, unknown>, db: Dat
           'Podpisz dokument',
         ];
 
+        // Add machine-readable provenance watermark
+        const provenance = `[MECENAS-AI | ${new Date().toISOString()} | sesja: ${session.key.slice(0, 12)}]`;
+        const watermarkedContent = `${provenance}\nPROJEKT — WYMAGA WERYFIKACJI PRAWNIKA\n\n${content}`;
+
         const doc = db.createDocument({
           caseId: docCaseId,
           type: docType as any,
           title: docTitle,
-          content,
+          content: watermarkedContent,
           status: 'szkic',
           version: 1,
         });
@@ -1858,6 +1922,51 @@ async function executeTool(name: string, input: Record<string, unknown>, db: Dat
         db.deleteCase(delCaseId);
         return JSON.stringify({ success: true, message: 'Sprawa i powiązane dane usunięte.' });
       }
+      // ── Privacy & Compliance Tools ──
+      case 'record_ai_consent': {
+        const conCaseId = resolveCaseId(input, session);
+        if (!conCaseId) return JSON.stringify({ error: 'ID sprawy jest wymagane.' });
+        if (!db.getCase(conCaseId)) return JSON.stringify({ error: 'Sprawa nie znaleziona.' });
+        const scope = optString(input, 'scope') ?? 'local_only';
+        const notes = optString(input, 'notes');
+        const consent = db.recordAiConsent(conCaseId, session.userId, scope, notes ?? undefined);
+        logPrivacyEvent({ action: 'consent_record', sessionKey: session.key, userId: session.userId, caseId: conCaseId, reason: `scope=${scope}` });
+        return JSON.stringify({ success: true, consent, message: `Zgoda na AI zarejestrowana (zakres: ${scope}).` });
+      }
+      case 'check_ai_consent': {
+        const chkCaseId = resolveCaseId(input, session);
+        if (!chkCaseId) return JSON.stringify({ error: 'ID sprawy jest wymagane.' });
+        const consent = db.getAiConsent(chkCaseId);
+        if (!consent) return JSON.stringify({ hasConsent: false, message: 'Brak zgody na AI dla tej sprawy.' });
+        return JSON.stringify({ hasConsent: true, consent });
+      }
+      case 'revoke_ai_consent': {
+        const revCaseId = resolveCaseId(input, session);
+        if (!revCaseId) return JSON.stringify({ error: 'ID sprawy jest wymagane.' });
+        const revoked = db.revokeAiConsent(revCaseId);
+        if (!revoked) return JSON.stringify({ error: 'Brak aktywnej zgody do cofnięcia.' });
+        return JSON.stringify({ success: true, message: 'Zgoda na AI cofnięta.' });
+      }
+      case 'gdpr_delete_client': {
+        const gdprClientId = requireString(input, 'clientId');
+        if (!gdprClientId) return JSON.stringify({ error: 'ID klienta jest wymagane.' });
+        if (input.confirm !== true) return JSON.stringify({ error: 'Wymagane potwierdzenie: confirm=true. Operacja jest NIEODWRACALNA — trwale usuwa wszystkie dane klienta.' });
+        const client = db.getClient(gdprClientId);
+        if (!client) return JSON.stringify({ error: 'Klient nie znaleziony.' });
+        const result = db.gdprDeleteClient(gdprClientId);
+        logPrivacyEvent({ action: 'gdpr_delete', sessionKey: session.key, userId: session.userId, reason: `client_deleted`, privacyMode: (session.metadata?.privacyMode as string) ?? 'auto' });
+        return JSON.stringify({ success: true, ...result, message: `Dane klienta trwale usunięte (Art. 17 RODO). Usunięto ${result.deletedCases} spraw, ${result.deletedDocuments} dokumentów, oczyszczono ${result.deletedSessions} sesji.` });
+      }
+      case 'set_case_privacy': {
+        const scpCaseId = requireString(input, 'caseId');
+        if (!scpCaseId) return JSON.stringify({ error: 'ID sprawy jest wymagane.' });
+        const mode = requireString(input, 'privacyMode');
+        if (!mode || !['auto', 'strict', 'off'].includes(mode)) return JSON.stringify({ error: 'Tryb musi być: auto, strict lub off.' });
+        const updated = db.updateCase(scpCaseId, { privacyMode: mode } as any);
+        if (!updated) return JSON.stringify({ error: 'Sprawa nie znaleziona.' });
+        logPrivacyEvent({ action: 'mode_change', sessionKey: session.key, userId: session.userId, caseId: scpCaseId, reason: `case_privacy_set_${mode}`, privacyMode: mode });
+        return JSON.stringify({ success: true, message: `Tryb prywatności sprawy ustawiony na: ${mode}.` });
+      }
       default:
         return JSON.stringify({ error: `Nieznane narzędzie: ${name}` });
     }
@@ -1970,6 +2079,10 @@ function classifyPrivacy(
     const activeCase = db.getCase(activeCaseId);
     if (activeCase) {
       hasPii = true; // Active case always has client PII in system prompt
+      // Per-case privacy override (e.g. strict for criminal/family cases)
+      if (activeCase.privacyMode === 'strict') {
+        return { decision: 'local', reason: 'case_strict_mode' };
+      }
     }
   }
 
@@ -2027,6 +2140,8 @@ export function createAgent(config: Config, db: Database): Agent {
     async handleMessage(text: string, session: Session): Promise<string | null> {
       // --- Privacy-aware routing ---
       const privacy = classifyPrivacy(text, session, config, db);
+      const activeCaseId = session.metadata?.activeCaseId as string | undefined;
+      const piiResult = detectPii(text);
 
       if (privacy.decision === 'local' || privacy.decision === 'refuse') {
         // Must use local model — check if Ollama is available
@@ -2034,10 +2149,12 @@ export function createAgent(config: Config, db: Database): Agent {
 
         if (!ollamaUp) {
           if (privacy.decision === 'refuse') {
+            logPrivacyEvent({ action: 'route_refuse', sessionKey: session.key, userId: session.userId, caseId: activeCaseId, reason: privacy.reason, piiMatchCount: piiResult.matches.length, piiTypes: [...new Set(piiResult.matches.map(m => m.type))], privacyMode: (session.metadata?.privacyMode as string) ?? config.privacy.mode });
             return '⚠️ **Ochrona prywatności**: Wykryto dane wrażliwe, a lokalny model AI (Ollama) jest niedostępny. Nie mogę przetworzyć tej wiadomości przez zewnętrzny serwer ze względu na tajemnicę adwokacką. Uruchom Ollama (`ollama serve`) i spróbuj ponownie.';
           }
           // decision === 'local' (PII detected, Ollama down)
           if (config.privacy.blockCloudOnPii) {
+            logPrivacyEvent({ action: 'route_refuse', sessionKey: session.key, userId: session.userId, caseId: activeCaseId, reason: 'pii_ollama_down_blocked', piiMatchCount: piiResult.matches.length, piiTypes: [...new Set(piiResult.matches.map(m => m.type))], privacyMode: (session.metadata?.privacyMode as string) ?? config.privacy.mode });
             logger.warn({ reason: privacy.reason }, 'Wykryto dane wrażliwe — Ollama niedostępna, blokuję przekazanie do chmury');
             return '⚠️ **Ochrona prywatności**: Wykryto dane osobowe (PESEL, NIP, dane klienta) w wiadomości lub kontekście aktywnej sprawy. Lokalny model AI (Ollama) jest niedostępny. Ze względu na ochronę tajemnicy adwokackiej nie mogę przekazać tych danych do zewnętrznego serwera. Uruchom Ollama (`ollama serve`) lub wyłącz kontekst aktywnej sprawy (`/clear`).';
           }
@@ -2045,7 +2162,8 @@ export function createAgent(config: Config, db: Database): Agent {
           logger.warn({ reason: privacy.reason }, 'blockCloudOnPii=false — wymuszam anonimizację przed wysłaniem do chmury');
         } else {
           // Ollama is up — route locally
-          if (privacy.reason === 'pii_detected' || privacy.reason === 'strict_mode') {
+          if (privacy.reason === 'pii_detected' || privacy.reason === 'strict_mode' || privacy.reason === 'case_strict_mode') {
+            logPrivacyEvent({ action: 'route_local', sessionKey: session.key, userId: session.userId, caseId: activeCaseId, reason: privacy.reason, piiMatchCount: piiResult.matches.length, piiTypes: [...new Set(piiResult.matches.map(m => m.type))], privacyMode: (session.metadata?.privacyMode as string) ?? config.privacy.mode, provider: 'ollama' });
             logger.info({ reason: privacy.reason }, 'Wykryto dane wrażliwe — wymuszam routing lokalny');
           }
 
@@ -2144,10 +2262,14 @@ async function handleWithAnthropic(
   db: Database,
   forceAnonymize = false
 ): Promise<string | null> {
-  const client = new Anthropic({ apiKey: config.agent.anthropicKey });
-
-  // --- Privacy: resolve effective mode (per-session override → global config) ---
+  // --- Network isolation: strict mode blocks ALL cloud calls ---
   const effectivePrivacyMode = (session.metadata?.privacyMode as string) ?? config.privacy.mode;
+  if (effectivePrivacyMode === 'strict') {
+    logPrivacyEvent({ action: 'route_refuse', sessionKey: session.key, userId: session.userId, reason: 'strict_mode_cloud_blocked', privacyMode: 'strict', provider: 'anthropic' });
+    return '⚠️ **Ochrona prywatności**: Tryb ścisły aktywny — wszystkie zapytania muszą być przetwarzane lokalnie. Zewnętrzne serwery AI są zablokowane. Uruchom Ollama (`ollama serve`).';
+  }
+
+  const client = new Anthropic({ apiKey: config.agent.anthropicKey });
 
   // --- Privacy: create per-request anonymizer ---
   // forceAnonymize=true when PII was detected but blockCloudOnPii=false (must protect regardless)
@@ -2174,6 +2296,7 @@ async function handleWithAnthropic(
   }
 
   if (anonymizer && anonymizer.hasReplacements) {
+    logPrivacyEvent({ action: 'route_cloud_anon', sessionKey: session.key, userId: session.userId, reason: 'anonymized_for_cloud', anonymizationCount: anonymizer.mappingCount, privacyMode: effectivePrivacyMode, provider: 'anthropic' });
     logger.info({ mappings: anonymizer.mappingCount }, 'Anonimizacja PII przed wysłaniem do Anthropic');
   }
 

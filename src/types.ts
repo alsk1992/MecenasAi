@@ -143,6 +143,7 @@ export interface LegalCase {
   opposingCounsel?: string;
   valueOfDispute?: number;    // wartość przedmiotu sporu (WPS)
   notes?: string;
+  privacyMode?: PrivacyMode;  // per-case privacy override (null = inherit global)
   createdAt: Date;
   updatedAt: Date;
 }
@@ -279,6 +280,12 @@ export interface PrivacyConfig {
   anonymizeForCloud: boolean;
   /** Strip active case context from system prompt for cloud (default: true) */
   stripActiveCaseForCloud: boolean;
+  /** Session auto-purge after N hours of inactivity (default: 72) */
+  sessionPurgeHours: number;
+  /** Session auto-lock after N minutes of inactivity — clears active case (default: 30) */
+  sessionLockMinutes: number;
+  /** Enable security headers HSTS etc. (default: false) */
+  hstsEnabled: boolean;
 }
 
 export interface Config {

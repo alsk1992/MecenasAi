@@ -7,6 +7,7 @@ import { logger } from '../utils/logger.js';
 import type { Config, IncomingMessage, OutgoingMessage, Session } from '../types.js';
 import { createServer } from './server.js';
 import { initDatabase, type Database } from '../db/index.js';
+import { logPrivacyEvent } from '../privacy/audit.js';
 
 export interface AppGateway {
   start(): Promise<void>;
@@ -68,6 +69,8 @@ export async function createGateway(config: Config): Promise<AppGateway> {
   let webchatSend: ((chatId: string, text: string) => void) | null = null;
   let webchatBroadcast: ((text: string) => void) | null = null;
   let stopReminders: (() => void) | null = null;
+  let purgeTimer: NodeJS.Timeout | null = null;
+  let lockTimer: NodeJS.Timeout | null = null;
 
   const sendMessage = async (msg: OutgoingMessage): Promise<void> => {
     if (msg.platform === 'telegram' && telegramBot) {
@@ -664,6 +667,45 @@ export async function createGateway(config: Config): Promise<AppGateway> {
         }
       });
 
+      // Session auto-purge — delete expired sessions periodically
+      const purgeHours = config.privacy.sessionPurgeHours;
+      if (purgeHours > 0) {
+        const purgeMs = purgeHours * 60 * 60 * 1000;
+        const doPurge = () => {
+          const count = db.purgeExpiredSessions(purgeMs);
+          if (count > 0) {
+            logPrivacyEvent({ action: 'session_purge', reason: `purged_${count}_sessions`, privacyMode: config.privacy.mode });
+            // Also clear from in-memory cache
+            for (const [key, sess] of sessions) {
+              if (sess.updatedAt.getTime() < Date.now() - purgeMs) {
+                sessions.delete(key);
+              }
+            }
+          }
+        };
+        doPurge(); // run on startup
+        purgeTimer = setInterval(doPurge, 60 * 60 * 1000); // every hour
+        logger.info({ purgeHours }, 'Session auto-purge aktywne');
+      }
+
+      // Session auto-lock — clear active case after inactivity
+      const lockMinutes = config.privacy.sessionLockMinutes;
+      if (lockMinutes > 0) {
+        const lockMs = lockMinutes * 60 * 1000;
+        lockTimer = setInterval(() => {
+          const locked = db.lockInactiveSessions(lockMs);
+          for (const key of locked) {
+            const cached = sessions.get(key);
+            if (cached?.metadata?.activeCaseId) {
+              delete cached.metadata.activeCaseId;
+              cached.metadata._lockedAt = Date.now();
+              logPrivacyEvent({ action: 'session_lock', sessionKey: key, reason: 'inactivity_lock', privacyMode: config.privacy.mode });
+            }
+          }
+        }, 5 * 60 * 1000); // check every 5 minutes
+        logger.info({ lockMinutes }, 'Session auto-lock aktywne');
+      }
+
       if (config.gateway.auth === 'off') {
         logger.warn('API authentication is OFF — all endpoints are open! Set MECENAS_AUTH=token and MECENAS_TOKEN to secure.');
       }
@@ -675,6 +717,8 @@ export async function createGateway(config: Config): Promise<AppGateway> {
       started = false;
 
       if (stopReminders) { stopReminders(); stopReminders = null; }
+      if (purgeTimer) { clearInterval(purgeTimer); purgeTimer = null; }
+      if (lockTimer) { clearInterval(lockTimer); lockTimer = null; }
 
       if (telegramBot) {
         try { telegramBot.stop(); } catch {}

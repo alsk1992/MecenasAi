@@ -68,6 +68,9 @@ export function loadConfig(): Config {
       blockCloudOnPii: (fileConfig.privacy as any)?.blockCloudOnPii ?? true,
       anonymizeForCloud: (fileConfig.privacy as any)?.anonymizeForCloud ?? true,
       stripActiveCaseForCloud: (fileConfig.privacy as any)?.stripActiveCaseForCloud ?? true,
+      sessionPurgeHours: safeParseInt(process.env.MECENAS_SESSION_PURGE_HOURS, (fileConfig.privacy as any)?.sessionPurgeHours ?? 72),
+      sessionLockMinutes: safeParseInt(process.env.MECENAS_SESSION_LOCK_MINUTES, (fileConfig.privacy as any)?.sessionLockMinutes ?? 30),
+      hstsEnabled: process.env.MECENAS_HSTS === 'true' || ((fileConfig.privacy as any)?.hstsEnabled ?? false),
     },
     agent: {
       model: fileConfig.agent?.model ?? defaultModel,

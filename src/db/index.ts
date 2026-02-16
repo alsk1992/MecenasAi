@@ -9,6 +9,8 @@ import { mkdirSync, existsSync, readFileSync, writeFileSync, renameSync, readdir
 import { logger } from '../utils/logger.js';
 import { resolveStateDir } from '../config/index.js';
 import { generateId as secureId } from '../utils/id.js';
+import { getEncryptionKey, encryptBuffer, decryptBuffer, isEncryptedFile } from '../privacy/encryption.js';
+import { initAuditLog } from '../privacy/audit.js';
 import type {
   User,
   Session,
@@ -50,11 +52,16 @@ function scheduleSave(): void {
   }, 5000);
 }
 
+let _encKey: Buffer | null = null;
+
 function saveDatabase(): void {
   if (!db) return;
   try {
     const data = db.export();
-    const buffer = Buffer.from(data);
+    let buffer: Buffer = Buffer.from(data) as Buffer;
+    if (_encKey) {
+      buffer = encryptBuffer(buffer, _encKey) as Buffer;
+    }
     const tmpPath = DB_FILE + '.tmp';
     writeFileSync(tmpPath, buffer);
     renameSync(tmpPath, DB_FILE);
@@ -246,7 +253,7 @@ const SCHEMA = `
 // =============================================================================
 
 /** Current schema version — increment when adding migrations */
-const CURRENT_SCHEMA_VERSION = 3;
+const CURRENT_SCHEMA_VERSION = 4;
 
 /** Each migration upgrades from (version - 1) to version */
 const MIGRATIONS: Record<number, string[]> = {
@@ -274,6 +281,40 @@ const MIGRATIONS: Record<number, string[]> = {
     )`,
     'CREATE INDEX IF NOT EXISTS idx_invoices_client ON invoices(client_id)',
     'CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status)',
+  ],
+  4: [
+    // Privacy audit log — compliance trail (never stores actual PII)
+    `CREATE TABLE IF NOT EXISTS privacy_audit_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      action TEXT NOT NULL,
+      session_key TEXT,
+      user_id TEXT,
+      case_id TEXT,
+      reason TEXT NOT NULL,
+      pii_match_count INTEGER NOT NULL DEFAULT 0,
+      pii_types TEXT,
+      anonymization_count INTEGER NOT NULL DEFAULT 0,
+      privacy_mode TEXT,
+      provider TEXT,
+      timestamp INTEGER NOT NULL
+    )`,
+    'CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON privacy_audit_log(timestamp)',
+    'CREATE INDEX IF NOT EXISTS idx_audit_action ON privacy_audit_log(action)',
+    'CREATE INDEX IF NOT EXISTS idx_audit_session ON privacy_audit_log(session_key)',
+    // AI consent tracking per case
+    `CREATE TABLE IF NOT EXISTS ai_consent (
+      id TEXT PRIMARY KEY,
+      case_id TEXT NOT NULL,
+      acknowledged_by TEXT NOT NULL,
+      scope TEXT NOT NULL DEFAULT 'local_only',
+      notes TEXT,
+      acknowledged_at INTEGER NOT NULL,
+      revoked_at INTEGER,
+      FOREIGN KEY (case_id) REFERENCES cases(id) ON DELETE CASCADE
+    )`,
+    'CREATE INDEX IF NOT EXISTS idx_consent_case ON ai_consent(case_id)',
+    // Per-case privacy mode override
+    `ALTER TABLE cases ADD COLUMN privacy_mode TEXT DEFAULT NULL`,
   ],
 };
 
@@ -327,11 +368,27 @@ function runMigrations(sqlDb: import('sql.js').Database): void {
 export async function initDatabase(): Promise<Database> {
   if (!existsSync(DB_DIR)) mkdirSync(DB_DIR, { recursive: true });
 
+  // Initialize encryption key (null = disabled)
+  _encKey = getEncryptionKey();
+  if (_encKey) {
+    logger.info('Szyfrowanie bazy danych aktywne (AES-256-GCM)');
+  }
+
   const SQL = await initSqlJs();
 
   if (existsSync(DB_FILE)) {
     try {
-      const buffer = readFileSync(DB_FILE);
+      let buffer = readFileSync(DB_FILE);
+      // Decrypt if file is encrypted
+      if (_encKey && isEncryptedFile(buffer)) {
+        const decrypted = decryptBuffer(buffer, _encKey);
+        if (!decrypted) {
+          throw new Error('Nie udało się odszyfrować bazy — zły klucz?');
+        }
+        buffer = Buffer.from(decrypted) as Buffer<ArrayBuffer>;
+      } else if (!_encKey && isEncryptedFile(buffer)) {
+        throw new Error('Baza jest zaszyfrowana ale brak klucza — ustaw MECENAS_DB_KEY');
+      }
       db = new SQL.Database(buffer);
     } catch (err) {
       logger.warn({ err }, 'Nie udało się załadować bazy — tworzenie nowej');
@@ -364,13 +421,16 @@ export async function initDatabase(): Promise<Database> {
     logger.warn({ err }, 'VACUUM nie powiódł się — kontynuuję');
   }
 
+  // Initialize audit log with DB reference
+  initAuditLog(db, scheduleSave);
+
   saveDatabase();
 
   // Daily backup — copy DB file to backups/ with date stamp, keep last 7
   if (!existsSync(BACKUP_DIR)) mkdirSync(BACKUP_DIR, { recursive: true });
   scheduleBackup();
 
-  logger.info({ path: DB_FILE }, 'Baza danych zainicjalizowana');
+  logger.info({ path: DB_FILE, encrypted: !!_encKey }, 'Baza danych zainicjalizowana');
 
   return createDatabaseInterface(db);
 }
@@ -456,6 +516,14 @@ export interface Database {
   storeEmbedding(id: string, sourceType: string, sourceId: string, vector: Float32Array, contentHash?: string): void;
   getEmbedding(id: string): { id: string; vector: Float32Array } | null;
   findSimilarEmbeddings(vector: Float32Array, sourceType: string, limit?: number): Array<{ id: string; sourceId: string; similarity: number }>;
+
+  // Privacy & Compliance
+  purgeExpiredSessions(maxAgeMs: number): number;
+  lockInactiveSessions(maxInactiveMs: number): string[];
+  recordAiConsent(caseId: string, acknowledgedBy: string, scope?: string, notes?: string): { id: string };
+  getAiConsent(caseId: string): { id: string; caseId: string; acknowledgedBy: string; scope: string; acknowledgedAt: Date; revokedAt?: Date } | null;
+  revokeAiConsent(caseId: string): boolean;
+  gdprDeleteClient(clientId: string): { deletedCases: number; deletedDocuments: number; deletedSessions: number };
 
   // Raw
   raw(): SqlJsDatabase;
@@ -1233,6 +1301,133 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
       }
       results.sort((a, b) => b.similarity - a.similarity);
       return results.slice(0, limit);
+    },
+
+    // ===== PRIVACY & COMPLIANCE =====
+
+    purgeExpiredSessions(maxAgeMs: number): number {
+      const cutoff = now() - maxAgeMs;
+      const countRows = sqlDb.exec('SELECT COUNT(*) FROM sessions WHERE updated_at < ?', [cutoff]);
+      const count = countRows.length ? (countRows[0].values[0][0] as number) : 0;
+      if (count > 0) {
+        sqlDb.run('DELETE FROM sessions WHERE updated_at < ?', [cutoff]);
+        scheduleSave();
+        logger.info({ count, maxAgeMs }, 'Wyczyszczono wygasłe sesje');
+      }
+      return count;
+    },
+
+    lockInactiveSessions(maxInactiveMs: number): string[] {
+      const cutoff = now() - maxInactiveMs;
+      const rows = sqlDb.exec(
+        "SELECT key, metadata FROM sessions WHERE updated_at < ? AND metadata LIKE '%activeCaseId%'",
+        [cutoff]
+      );
+      if (!rows.length) return [];
+      const locked: string[] = [];
+      for (const v of rows[0].values) {
+        const key = v[0] as string;
+        const meta = safeJsonParse(v[1] as string, {} as Record<string, unknown>);
+        if (meta.activeCaseId) {
+          delete meta.activeCaseId;
+          meta._lockedAt = now();
+          sqlDb.run('UPDATE sessions SET metadata = ? WHERE key = ?', [JSON.stringify(meta), key]);
+          locked.push(key);
+        }
+      }
+      if (locked.length) {
+        scheduleSave();
+        logger.info({ count: locked.length }, 'Zablokowano nieaktywne sesje (usunięto kontekst sprawy)');
+      }
+      return locked;
+    },
+
+    recordAiConsent(caseId: string, acknowledgedBy: string, scope = 'local_only', notes?: string) {
+      const id = generateId();
+      sqlDb.run(
+        'INSERT OR REPLACE INTO ai_consent (id, case_id, acknowledged_by, scope, notes, acknowledged_at) VALUES (?, ?, ?, ?, ?, ?)',
+        [id, caseId, acknowledgedBy, scope, notes ?? null, now()]
+      );
+      scheduleSave();
+      return { id };
+    },
+
+    getAiConsent(caseId: string) {
+      const rows = sqlDb.exec(
+        'SELECT id, case_id, acknowledged_by, scope, acknowledged_at, revoked_at FROM ai_consent WHERE case_id = ? AND revoked_at IS NULL ORDER BY acknowledged_at DESC LIMIT 1',
+        [caseId]
+      );
+      if (!rows.length || !rows[0].values.length) return null;
+      const v = rows[0].values[0];
+      return {
+        id: v[0] as string,
+        caseId: v[1] as string,
+        acknowledgedBy: v[2] as string,
+        scope: v[3] as string,
+        acknowledgedAt: new Date(v[4] as number),
+        revokedAt: v[5] ? new Date(v[5] as number) : undefined,
+      };
+    },
+
+    revokeAiConsent(caseId: string): boolean {
+      const existing = this.getAiConsent(caseId);
+      if (!existing) return false;
+      sqlDb.run('UPDATE ai_consent SET revoked_at = ? WHERE case_id = ? AND revoked_at IS NULL', [now(), caseId]);
+      scheduleSave();
+      return true;
+    },
+
+    gdprDeleteClient(clientId: string) {
+      const cases = this.listCases({ clientId });
+      let deletedDocuments = 0;
+      let deletedSessions = 0;
+
+      // Delete all case-linked data
+      for (const c of cases) {
+        const docs = sqlDb.exec('SELECT COUNT(*) FROM documents WHERE case_id = ?', [c.id]);
+        deletedDocuments += docs.length ? (docs[0].values[0][0] as number) : 0;
+        sqlDb.run('DELETE FROM documents WHERE case_id = ?', [c.id]);
+        sqlDb.run('DELETE FROM deadlines WHERE case_id = ?', [c.id]);
+        sqlDb.run('DELETE FROM time_entries WHERE case_id = ?', [c.id]);
+        sqlDb.run('DELETE FROM ai_consent WHERE case_id = ?', [c.id]);
+      }
+
+      // Delete invoices
+      sqlDb.run('DELETE FROM invoices WHERE client_id = ?', [clientId]);
+
+      // Delete cases
+      sqlDb.run('DELETE FROM cases WHERE client_id = ?', [clientId]);
+
+      // Scrub client references from session messages
+      const client = this.getClient(clientId);
+      if (client) {
+        const allSessions = sqlDb.exec('SELECT key, messages FROM sessions');
+        if (allSessions.length) {
+          for (const row of allSessions[0].values) {
+            const key = row[0] as string;
+            const messagesStr = row[1] as string;
+            if (messagesStr.includes(client.name) || (client.pesel && messagesStr.includes(client.pesel))) {
+              // Replace client PII in messages with [USUNIĘTO]
+              let cleaned = messagesStr;
+              cleaned = cleaned.split(client.name).join('[USUNIĘTO-KLIENT]');
+              if (client.pesel) cleaned = cleaned.split(client.pesel).join('[USUNIĘTO-PESEL]');
+              if (client.nip) cleaned = cleaned.split(client.nip).join('[USUNIĘTO-NIP]');
+              if (client.phone) cleaned = cleaned.split(client.phone).join('[USUNIĘTO-TEL]');
+              if (client.email) cleaned = cleaned.split(client.email).join('[USUNIĘTO-EMAIL]');
+              sqlDb.run('UPDATE sessions SET messages = ? WHERE key = ?', [cleaned, key]);
+              deletedSessions++;
+            }
+          }
+        }
+      }
+
+      // Delete the client record
+      sqlDb.run('DELETE FROM clients WHERE id = ?', [clientId]);
+
+      scheduleSave();
+      logger.info({ clientId, deletedCases: cases.length, deletedDocuments, deletedSessions }, 'RODO: usunięto dane klienta');
+
+      return { deletedCases: cases.length, deletedDocuments, deletedSessions };
     },
 
     raw() { return sqlDb; },

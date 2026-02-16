@@ -1,8 +1,11 @@
 /**
  * Privacy PII Detector for Polish Legal Data
  * Detects PESEL, NIP, REGON, phone numbers, emails, postal codes,
- * case signatures, Polish names after legal keywords, and sensitive terms.
+ * case signatures, Polish names (dictionary + keyword), IBAN, ID cards,
+ * passports, addresses, company names, and sensitive terms.
  */
+
+import { findPolishNames, containsPolishName } from './names.js';
 
 // =============================================================================
 // TYPES
@@ -269,6 +272,15 @@ export function detectPii(text: string): DetectionResult {
     matches.push({ type: 'company_name', value: m[0], index: m.index! });
   }
 
+  // --- Freestanding Polish names (dictionary-based) ---
+  const existingNamePositions = new Set(matches.filter(m => m.type === 'person_name').map(m => m.index));
+  for (const nm of findPolishNames(text)) {
+    // Skip if already caught by keyword-based detection
+    if (!existingNamePositions.has(nm.index)) {
+      matches.push({ type: 'person_name', value: nm.name, index: nm.index });
+    }
+  }
+
   // --- Sensitive keywords ---
   const lower = text.toLowerCase();
   for (const kw of SENSITIVE_KEYWORDS) {
@@ -313,6 +325,9 @@ export function containsSensitiveData(text: string): boolean {
   NAME_AFTER_KEYWORD_RE.lastIndex = 0;
   if (ID_CARD_RE.test(text)) { ID_CARD_RE.lastIndex = 0; return true; }
   ID_CARD_RE.lastIndex = 0;
+
+  // Dictionary-based Polish name check
+  if (containsPolishName(text)) return true;
 
   return false;
 }
