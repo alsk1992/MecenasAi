@@ -247,6 +247,91 @@ export function createServer(config: Config, db: Database): HttpServer {
           }
         }
 
+        // Document Upload API
+        if (pathname === '/api/documents/upload' && req.method === 'POST') {
+          // Accept file as raw binary body. Metadata via query params.
+          // Max 10MB for uploaded documents.
+          const MAX_UPLOAD = 10 * 1024 * 1024;
+          const chunks: Buffer[] = [];
+          let totalSize = 0;
+          let aborted = false;
+          req.on('data', (chunk: Buffer) => {
+            totalSize += chunk.length;
+            if (totalSize > MAX_UPLOAD) {
+              aborted = true;
+              req.destroy();
+              if (!res.headersSent) {
+                res.writeHead(413, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Plik zbyt duży (max 10MB)' }));
+              }
+              return;
+            }
+            chunks.push(chunk);
+          });
+          req.on('end', async () => {
+            if (aborted || res.headersSent) return;
+            const buffer = Buffer.concat(chunks);
+            const filename = decodeURIComponent(url.searchParams.get('filename') ?? 'dokument');
+            const caseId = url.searchParams.get('caseId') ?? undefined;
+            const ext = filename.split('.').pop()?.toLowerCase() ?? '';
+
+            let extractedText = '';
+            try {
+              if (ext === 'pdf') {
+                const { extractText } = await import('unpdf');
+                const pdfResult = await extractText(buffer);
+                const pdfText = pdfResult.text;
+                extractedText = Array.isArray(pdfText) ? pdfText.join('\n') : String(pdfText ?? '');
+              } else if (ext === 'docx') {
+                const mammoth = await import('mammoth') as any;
+                const result = await mammoth.extractRawText({ buffer });
+                extractedText = result.value ?? '';
+              } else if (ext === 'txt' || ext === 'md' || ext === 'csv') {
+                extractedText = buffer.toString('utf-8');
+              } else {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: `Nieobsługiwany format pliku: .${ext}. Obsługiwane: PDF, DOCX, TXT.` }));
+                return;
+              }
+            } catch (err: any) {
+              logger.warn({ err, filename }, 'Document parsing error');
+              res.writeHead(422, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: `Nie udało się odczytać pliku: ${err?.message?.slice(0, 200) ?? 'nieznany błąd'}` }));
+              return;
+            }
+
+            if (!extractedText.trim()) {
+              res.writeHead(422, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Plik nie zawiera tekstu (może być zeskanowany obraz — OCR nie jest jeszcze obsługiwany).' }));
+              return;
+            }
+
+            // Store as document in DB
+            const doc = db.createDocument({
+              caseId,
+              type: 'inne',
+              title: `[Przesłany] ${filename}`,
+              content: extractedText.slice(0, 200_000), // cap at 200K chars
+              status: 'szkic',
+              version: 1,
+            });
+
+            res.writeHead(201, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              success: true,
+              document: { id: doc.id, title: doc.title, chars: extractedText.length },
+              message: `Plik "${filename}" przesłany i przetworzony. ${extractedText.length} znaków wyodrębnionego tekstu.`,
+            }));
+          });
+          req.on('error', () => {
+            if (!res.headersSent) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Błąd przesyłania pliku' }));
+            }
+          });
+          return;
+        }
+
         // Documents API
         if (pathname === '/api/documents' && req.method === 'GET') {
           const status = url.searchParams.get('status') ?? undefined;
@@ -743,6 +828,86 @@ export function createServer(config: Config, db: Database): HttpServer {
             res.end(JSON.stringify({ success: true }));
             return;
           }
+        }
+
+        // ── Legal Calculators API (stateless, no auth required) ──
+        if (pathname === '/api/calc/court-fee' && req.method === 'GET') {
+          const amount = parseFloat(url.searchParams.get('amount') ?? '0');
+          const caseType = url.searchParams.get('type') ?? 'cywilna';
+          if (!Number.isFinite(amount) || amount < 0) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Parametr amount jest wymagany (liczba >= 0)' }));
+            return;
+          }
+          let fee = 0;
+          let basis = '';
+          if (caseType === 'rozwodowa') { fee = 600; basis = 'Art. 26 UKSC'; }
+          else if (caseType === 'spadkowa') { fee = 100; basis = 'Art. 49 UKSC'; }
+          else if (caseType === 'rejestrowa_krs') { fee = 500; basis = 'Art. 52 UKSC'; }
+          else if (caseType === 'wieczystoksiegowa') { fee = 200; basis = 'Art. 42 UKSC'; }
+          else if (caseType === 'nakazowa') { fee = Math.max(30, Math.round(amount * 0.05 * 0.25)); basis = 'Art. 13+19 UKSC (1/4)'; }
+          else if (caseType === 'zażalenie') { fee = Math.max(30, Math.round(amount * 0.05 * 0.2)); basis = 'Art. 13+19 UKSC (1/5)'; }
+          else { fee = Math.min(200000, Math.max(30, Math.round(amount * 0.05))); basis = 'Art. 13 UKSC (5%)'; }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ amount, case_type: caseType, court_fee: fee, basis }));
+          return;
+        }
+
+        if (pathname === '/api/calc/interest' && req.method === 'GET') {
+          const principal = parseFloat(url.searchParams.get('principal') ?? '0');
+          const startStr = url.searchParams.get('from') ?? '';
+          const endStr = url.searchParams.get('to') ?? new Date().toISOString().slice(0, 10);
+          const interestType = url.searchParams.get('type') ?? 'za_opoznienie';
+          if (!Number.isFinite(principal) || principal <= 0 || !startStr) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Parametry principal i from są wymagane' }));
+            return;
+          }
+          const startMs = Date.parse(startStr);
+          const endMs = Date.parse(endStr);
+          if (isNaN(startMs) || isNaN(endMs) || endMs <= startMs) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Nieprawidłowe daty' }));
+            return;
+          }
+          const rates: Record<string, number> = { ustawowe: 9.25, za_opoznienie: 11.25, handlowe: 15.75 };
+          const rate = rates[interestType] ?? 11.25;
+          const days = Math.floor((endMs - startMs) / 86_400_000);
+          const interest = principal * (rate / 100) * (days / 365);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ principal, rate, days, interest: +interest.toFixed(2), total: +(principal + interest).toFixed(2) }));
+          return;
+        }
+
+        if (pathname === '/api/calc/limitation' && req.method === 'GET') {
+          const claimType = url.searchParams.get('type') ?? 'ogolne';
+          const startStr = url.searchParams.get('from') ?? '';
+          if (!startStr) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Parametr from jest wymagany' }));
+            return;
+          }
+          const startMs = Date.parse(startStr);
+          if (isNaN(startMs)) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Nieprawidłowa data' }));
+            return;
+          }
+          const rules: Record<string, { years: number; eoy: boolean }> = {
+            ogolne: { years: 6, eoy: true }, gospodarcze: { years: 3, eoy: true },
+            okresowe: { years: 3, eoy: true }, sprzedaz: { years: 2, eoy: true },
+            przewoz: { years: 1, eoy: false }, delikt: { years: 3, eoy: true },
+            praca: { years: 3, eoy: false }, najem: { years: 1, eoy: false },
+            zlecenie: { years: 2, eoy: true }, dzielo: { years: 2, eoy: false },
+          };
+          const rule = rules[claimType] ?? rules.ogolne;
+          const limitDate = new Date(startMs);
+          limitDate.setFullYear(limitDate.getFullYear() + rule.years);
+          if (rule.eoy) { limitDate.setMonth(11); limitDate.setDate(31); }
+          const expired = limitDate < new Date();
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ claim_type: claimType, start_date: startStr, limitation_date: limitDate.toISOString().slice(0, 10), expired }));
+          return;
         }
 
         // 404

@@ -142,6 +142,12 @@ Dostępne narzędzia:
 - generate_billing_summary — podsumowanie rozliczeniowe
 - create_invoice, list_invoices, get_invoice, update_invoice — faktury
 - save_template, list_templates, use_template — biblioteka szablonów dokumentów
+- calculate_court_fee — kalkulator opłat sądowych (ustawa o kosztach sądowych)
+- calculate_interest — kalkulator odsetek ustawowych (kapitałowe, za opóźnienie, w transakcjach handlowych)
+- calculate_limitation — kalkulator przedawnienia roszczeń (terminy z KC i ustaw szczególnych)
+- search_court_decisions — wyszukiwanie orzeczeń sądowych w bazie SAOS (400K+ orzeczeń)
+- lookup_company — wyszukiwanie firm w KRS i CEIDG (dane rejestrowe, adres, status)
+- get_uploaded_document — pobierz treść przesłanego dokumentu (PDF/DOCX/TXT) do analizy
 
 Bądź konkretny, profesjonalny i pomocny. Jeśli czegoś nie wiesz, powiedz to wprost.`;
 
@@ -614,6 +620,97 @@ const TOOLS: ToolDef[] = [
       required: ['id'],
     },
   },
+  // ── Legal Calculators ──
+  {
+    name: 'calculate_court_fee',
+    description: 'Oblicz opłatę sądową na podstawie wartości przedmiotu sporu (WPS) lub typu sprawy. Zgodnie z ustawą o kosztach sądowych w sprawach cywilnych.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        amount: { type: 'number', description: 'Wartość przedmiotu sporu (WPS) w PLN' },
+        case_type: {
+          type: 'string',
+          enum: ['cywilna', 'nakazowa', 'upominawcza', 'uproszczona', 'rozwodowa', 'apelacja', 'zażalenie', 'skarga_kasacyjna', 'rejestrowa_krs', 'wieczystoksiegowa', 'spadkowa'],
+          description: 'Typ sprawy (domyślnie: cywilna)',
+        },
+      },
+      required: ['amount'],
+    },
+  },
+  {
+    name: 'calculate_interest',
+    description: 'Oblicz odsetki ustawowe za podany okres. Obsługuje: odsetki kapitałowe (art. 359 KC), za opóźnienie (art. 481 KC), w transakcjach handlowych.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        principal: { type: 'number', description: 'Kwota główna (kapitał) w PLN' },
+        start_date: { type: 'string', description: 'Data początkowa (YYYY-MM-DD)' },
+        end_date: { type: 'string', description: 'Data końcowa (YYYY-MM-DD, domyślnie dzisiaj)' },
+        interest_type: {
+          type: 'string',
+          enum: ['ustawowe', 'za_opoznienie', 'handlowe'],
+          description: 'Typ odsetek: ustawowe (kapitałowe 5%), za_opoznienie (7%), handlowe (10.25%)',
+        },
+      },
+      required: ['principal', 'start_date'],
+    },
+  },
+  {
+    name: 'calculate_limitation',
+    description: 'Oblicz termin przedawnienia roszczenia. Uwzględnia art. 118 KC (koniec roku kalendarzowego), terminy szczególne z ustaw.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        claim_type: {
+          type: 'string',
+          enum: ['ogolne', 'gospodarcze', 'okresowe', 'sprzedaz', 'przewoz', 'delikt', 'praca_wynagrodzenie', 'praca_inne', 'najem', 'zlecenie', 'dzielo_wada', 'ubezpieczenie', 'bezpodstawne_wzbogacenie'],
+          description: 'Typ roszczenia',
+        },
+        start_date: { type: 'string', description: 'Data wymagalności roszczenia (YYYY-MM-DD)' },
+      },
+      required: ['claim_type', 'start_date'],
+    },
+  },
+  {
+    name: 'search_court_decisions',
+    description: 'Wyszukaj orzeczenia sądowe w bazie SAOS (Sądy, Trybunały, SN — 400K+ orzeczeń). Podaje sygnaturę, datę, sąd, fragmenty uzasadnienia.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Fraza wyszukiwania (np. "odszkodowanie za błąd medyczny", "art. 415 KC")' },
+        court_type: { type: 'string', enum: ['COMMON', 'SUPREME', 'ADMINISTRATIVE', 'CONSTITUTIONAL_TRIBUNAL', 'NATIONAL_APPEAL_CHAMBER'], description: 'Typ sądu (opcjonalnie)' },
+        date_from: { type: 'string', description: 'Data od (YYYY-MM-DD)' },
+        date_to: { type: 'string', description: 'Data do (YYYY-MM-DD)' },
+        limit: { type: 'number', description: 'Liczba wyników (1-10, domyślnie 5)' },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'lookup_company',
+    description: 'Wyszukaj firmę w KRS (Krajowy Rejestr Sądowy) lub CEIDG (działalność gospodarcza). Podaj NIP, KRS lub nazwę.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'NIP, numer KRS lub nazwa firmy' },
+        registry: { type: 'string', enum: ['krs', 'ceidg', 'auto'], description: 'Rejestr (domyślnie auto — wyszukuje w obu)' },
+      },
+      required: ['query'],
+    },
+  },
+  // ── Document Upload Analysis ──
+  {
+    name: 'get_uploaded_document',
+    description: 'Pobierz treść przesłanego dokumentu (PDF/DOCX/TXT) do analizy. Użytkownik przesyła plik przez interfejs, a ty analizujesz jego treść.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'ID dokumentu do analizy' },
+        max_chars: { type: 'number', description: 'Maksymalna liczba znaków do zwrócenia (domyślnie 10000)' },
+      },
+      required: ['id'],
+    },
+  },
   // ── Invoices ──
   {
     name: 'create_invoice',
@@ -713,7 +810,7 @@ const VALID_DOC_TYPES = ['pozew', 'odpowiedz_na_pozew', 'apelacja', 'zarzuty', '
 // TOOL EXECUTION
 // =============================================================================
 
-function executeTool(name: string, input: Record<string, unknown>, db: Database, session: Session): string {
+async function executeTool(name: string, input: Record<string, unknown>, db: Database, session: Session): Promise<string> {
   try {
     switch (name) {
       case 'create_client': {
@@ -1081,6 +1178,417 @@ function executeTool(name: string, input: Record<string, unknown>, db: Database,
           lineItems,
         });
       }
+      // ===== LEGAL CALCULATORS =====
+      case 'calculate_court_fee': {
+        const wps = input.amount as number;
+        if (typeof wps !== 'number' || !Number.isFinite(wps) || wps < 0) {
+          return JSON.stringify({ error: 'Kwota WPS musi być liczbą >= 0.' });
+        }
+        const caseType = (optString(input, 'case_type') ?? 'cywilna') as string;
+
+        // Ustawa z dnia 28 lipca 2005 r. o kosztach sądowych w sprawach cywilnych
+        // Art. 13 — opłata stosunkowa 5% WPS, min 30 PLN, max 200 000 PLN
+        let fee = 0;
+        let basis = '';
+        let notes: string[] = [];
+
+        if (caseType === 'rozwodowa') {
+          fee = 600;
+          basis = 'Art. 26 ust. 1 pkt 1 UKSC — opłata stała 600 zł';
+        } else if (caseType === 'spadkowa') {
+          fee = 100;
+          basis = 'Art. 49 ust. 1 pkt 1 UKSC — wniosek o stwierdzenie nabycia spadku 100 zł';
+        } else if (caseType === 'rejestrowa_krs') {
+          fee = 500;
+          basis = 'Art. 52 UKSC — wpis do KRS 500 zł';
+        } else if (caseType === 'wieczystoksiegowa') {
+          fee = 200;
+          basis = 'Art. 42 ust. 1 UKSC — wpis do księgi wieczystej 200 zł';
+        } else if (caseType === 'uproszczona') {
+          // Art. 28 UKSC — opłaty stałe w postępowaniu uproszczonym
+          if (wps <= 500) fee = 30;
+          else if (wps <= 1500) fee = 100;
+          else if (wps <= 4000) fee = 200;
+          else if (wps <= 7500) fee = 400;
+          else if (wps <= 10000) fee = 500;
+          else if (wps <= 15000) fee = 750;
+          else if (wps <= 20000) fee = 1000;
+          else fee = Math.min(200000, Math.max(30, Math.round(wps * 0.05)));
+          basis = wps <= 20000 ? 'Art. 28 UKSC — opłata stała w postępowaniu uproszczonym' : 'Art. 13 ust. 2 UKSC — opłata stosunkowa 5%';
+        } else {
+          // Standard proportional fee
+          fee = Math.min(200000, Math.max(30, Math.round(wps * 0.05)));
+          basis = 'Art. 13 ust. 2 UKSC — opłata stosunkowa 5% WPS';
+          if (fee === 30) notes.push('Minimalna opłata sądowa: 30 zł');
+          if (fee === 200000) notes.push('Maksymalna opłata sądowa: 200 000 zł');
+        }
+
+        // Modifiers
+        if (caseType === 'nakazowa') {
+          fee = Math.max(30, Math.round(fee * 0.25));
+          basis += ' + Art. 19 ust. 2 UKSC — 1/4 opłaty w postępowaniu nakazowym';
+          notes.push('Jeśli nakaz zapłaty zostanie zaskarżony, pozwany wnosi 3/4 opłaty.');
+        } else if (caseType === 'upominawcza') {
+          // No fee reduction for electronic payment order anymore since 2020
+          basis += ' (pełna opłata w postępowaniu upominawczym)';
+        } else if (caseType === 'apelacja') {
+          basis += ' (opłata od apelacji = opłata od pozwu)';
+        } else if (caseType === 'zażalenie') {
+          fee = Math.max(30, Math.round(fee * 0.2));
+          basis += ' + Art. 19 ust. 3 UKSC — 1/5 opłaty od zażalenia';
+        } else if (caseType === 'skarga_kasacyjna') {
+          basis += ' (opłata od skargi kasacyjnej = opłata od pozwu)';
+        }
+
+        return JSON.stringify({
+          wps: `${wps.toFixed(2)} PLN`,
+          case_type: caseType,
+          court_fee: `${fee.toFixed(2)} PLN`,
+          court_fee_value: fee,
+          basis,
+          notes: notes.length > 0 ? notes : undefined,
+        });
+      }
+
+      case 'calculate_interest': {
+        const principal = input.principal as number;
+        if (typeof principal !== 'number' || !Number.isFinite(principal) || principal <= 0) {
+          return JSON.stringify({ error: 'Kwota główna musi być liczbą > 0.' });
+        }
+        const startDate = parseDate(input, 'start_date');
+        if (!startDate) return JSON.stringify({ error: 'Data początkowa jest wymagana (YYYY-MM-DD).' });
+        const endDate = parseDate(input, 'end_date') ?? new Date();
+        if (endDate <= startDate) return JSON.stringify({ error: 'Data końcowa musi być po dacie początkowej.' });
+
+        const interestType = (optString(input, 'interest_type') ?? 'za_opoznienie') as string;
+
+        // Current rates (NBP reference rate 5.75% as of Feb 2026)
+        // Art. 359 §2 KC: ustawowe = stopa referencyjna + 3.5pp = 9.25% (max 2x = 18.5%)
+        // Art. 481 §2 KC: za opóźnienie = stopa referencyjna + 5.5pp = 11.25% (max 2x = 22.5%)
+        // Art. 4 ustawy o terminach zapłaty: handlowe = stopa referencyjna + 10pp = 15.75%
+        // Note: these are simplified current rates. In production, should track historical rate changes.
+
+        let annualRate: number;
+        let legalBasis: string;
+
+        switch (interestType) {
+          case 'ustawowe':
+            annualRate = 9.25;
+            legalBasis = 'Art. 359 §2 KC — odsetki ustawowe (stopa referencyjna NBP 5.75% + 3.5pp)';
+            break;
+          case 'handlowe':
+            annualRate = 15.75;
+            legalBasis = 'Art. 4 ust. 3 ustawy o przeciwdziałaniu nadmiernym opóźnieniom (stopa referencyjna NBP 5.75% + 10pp)';
+            break;
+          case 'za_opoznienie':
+          default:
+            annualRate = 11.25;
+            legalBasis = 'Art. 481 §2 KC — odsetki ustawowe za opóźnienie (stopa referencyjna NBP 5.75% + 5.5pp)';
+            break;
+        }
+
+        const days = Math.floor((endDate.getTime() - startDate.getTime()) / 86_400_000);
+        const interest = principal * (annualRate / 100) * (days / 365);
+        const total = principal + interest;
+
+        return JSON.stringify({
+          principal: `${principal.toFixed(2)} PLN`,
+          interest_type: interestType,
+          annual_rate: `${annualRate}%`,
+          period: {
+            from: startDate.toISOString().slice(0, 10),
+            to: endDate.toISOString().slice(0, 10),
+            days,
+          },
+          interest: `${interest.toFixed(2)} PLN`,
+          total: `${total.toFixed(2)} PLN`,
+          legal_basis: legalBasis,
+          note: 'Obliczenie uproszczone (stała stopa). Przy zmianach stóp NBP w okresie naliczania należy obliczyć odsetki oddzielnie dla każdego podokresu.',
+        });
+      }
+
+      case 'calculate_limitation': {
+        const claimType = requireString(input, 'claim_type');
+        if (!claimType) return JSON.stringify({ error: 'Typ roszczenia jest wymagany.' });
+        const limitStartDate = parseDate(input, 'start_date');
+        if (!limitStartDate) return JSON.stringify({ error: 'Data wymagalności roszczenia jest wymagana (YYYY-MM-DD).' });
+
+        // Polish limitation periods (Art. 118+ KC and special statutes)
+        const limitationRules: Record<string, { years: number; endOfYear: boolean; basis: string }> = {
+          ogolne:                   { years: 6, endOfYear: true, basis: 'Art. 118 KC — ogólny termin przedawnienia 6 lat' },
+          gospodarcze:              { years: 3, endOfYear: true, basis: 'Art. 118 KC — roszczenia związane z działalnością gospodarczą 3 lata' },
+          okresowe:                 { years: 3, endOfYear: true, basis: 'Art. 118 KC — świadczenia okresowe 3 lata' },
+          sprzedaz:                 { years: 2, endOfYear: true, basis: 'Art. 554 KC — roszczenia z tytułu sprzedaży 2 lata' },
+          przewoz:                  { years: 1, endOfYear: false, basis: 'Art. 778 KC — roszczenia z umowy przewozu 1 rok' },
+          delikt:                   { years: 3, endOfYear: true, basis: 'Art. 442¹ §1 KC — roszczenie z czynu niedozwolonego 3 lata (od dnia dowiedzenia się o szkodzie), max 10 lat od zdarzenia' },
+          praca_wynagrodzenie:      { years: 3, endOfYear: false, basis: 'Art. 291 §1 KP — roszczenia ze stosunku pracy 3 lata' },
+          praca_inne:               { years: 3, endOfYear: false, basis: 'Art. 291 §1 KP — roszczenia ze stosunku pracy 3 lata' },
+          najem:                    { years: 1, endOfYear: false, basis: 'Art. 677 KC — roszczenia z najmu 1 rok od zwrotu rzeczy' },
+          zlecenie:                 { years: 2, endOfYear: true, basis: 'Art. 751 KC — roszczenia z umowy zlecenia 2 lata' },
+          dzielo_wada:              { years: 2, endOfYear: false, basis: 'Art. 646 KC — roszczenia z umowy o dzieło 2 lata od oddania dzieła' },
+          ubezpieczenie:            { years: 3, endOfYear: true, basis: 'Art. 819 §1 KC — roszczenia z umowy ubezpieczenia 3 lata' },
+          bezpodstawne_wzbogacenie: { years: 6, endOfYear: true, basis: 'Art. 118 KC — bezpodstawne wzbogacenie 6 lat (termin ogólny)' },
+        };
+
+        const rule = limitationRules[claimType];
+        if (!rule) return JSON.stringify({ error: `Nieznany typ roszczenia: ${claimType}. Dostępne: ${Object.keys(limitationRules).join(', ')}` });
+
+        const limitDate = new Date(limitStartDate);
+        limitDate.setFullYear(limitDate.getFullYear() + rule.years);
+
+        // Art. 118 KC: for periods >= 2 years, limitation ends on Dec 31
+        if (rule.endOfYear) {
+          limitDate.setMonth(11);
+          limitDate.setDate(31);
+        }
+
+        const now = new Date();
+        const isExpired = limitDate < now;
+        const daysLeft = isExpired ? 0 : Math.ceil((limitDate.getTime() - now.getTime()) / 86_400_000);
+
+        return JSON.stringify({
+          claim_type: claimType,
+          start_date: limitStartDate.toISOString().slice(0, 10),
+          limitation_years: rule.years,
+          ends_on_dec_31: rule.endOfYear,
+          limitation_date: limitDate.toISOString().slice(0, 10),
+          is_expired: isExpired,
+          days_remaining: daysLeft,
+          legal_basis: rule.basis,
+          warnings: isExpired
+            ? ['ROSZCZENIE PRZEDAWNIONE — dłużnik może podnieść zarzut przedawnienia (art. 117 §2 KC).']
+            : daysLeft < 90
+              ? [`Roszczenie przedawnia się za ${daysLeft} dni — rozważ przerwanie biegu przedawnienia (art. 123 KC).`]
+              : undefined,
+        });
+      }
+
+      // ===== EXTERNAL LOOKUPS =====
+      case 'search_court_decisions': {
+        const saosQuery = requireString(input, 'query');
+        if (!saosQuery) return JSON.stringify({ error: 'Zapytanie jest wymagane.' });
+        const saosLimit = Math.min(10, Math.max(1, optNumber(input, 'limit', 1, 10) ?? 5));
+
+        try {
+          const params = new URLSearchParams();
+          params.set('all', saosQuery.slice(0, 500));
+          params.set('pageSize', String(saosLimit));
+          params.set('sortingField', 'JUDGMENT_DATE');
+          params.set('sortingDirection', 'DESC');
+          const courtType = optString(input, 'court_type');
+          if (courtType) params.set('courtType', courtType);
+          const dateFrom = optString(input, 'date_from');
+          if (dateFrom) params.set('judgmentDateFrom', dateFrom);
+          const dateTo = optString(input, 'date_to');
+          if (dateTo) params.set('judgmentDateTo', dateTo);
+
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 15_000);
+          const resp = await fetch(`https://www.saos.org.pl/api/search/judgments?${params}`, {
+            headers: { 'Accept': 'application/json' },
+            signal: controller.signal,
+          });
+          clearTimeout(timeout);
+
+          if (!resp.ok) {
+            return JSON.stringify({ error: `SAOS API zwróciło błąd ${resp.status}. Spróbuj ponownie.` });
+          }
+
+          const data = await resp.json() as {
+            items?: Array<{
+              id: number;
+              courtType?: string;
+              courtCases?: Array<{ caseNumber: string }>;
+              judgmentType?: string;
+              judgmentDate?: string;
+              judges?: Array<{ name: string; function?: string }>;
+              textContent?: string;
+              keywords?: string[];
+              division?: { name?: string; court?: { name?: string } };
+            }>;
+            info?: { totalResults?: number };
+          };
+
+          const items = data.items ?? [];
+          if (items.length === 0) {
+            return JSON.stringify({ message: 'Nie znaleziono orzeczeń dla podanego zapytania.', results: [] });
+          }
+
+          const results = items.map(item => {
+            const caseNumbers = (item.courtCases ?? []).map(c => c.caseNumber).join(', ');
+            const courtName = item.division?.court?.name ?? item.courtType ?? '';
+            const divisionName = item.division?.name ?? '';
+            const judges = (item.judges ?? []).map(j => j.function ? `${j.name} (${j.function})` : j.name);
+            // Extract first ~500 chars of textContent as excerpt
+            let excerpt = '';
+            if (item.textContent) {
+              // Strip HTML tags
+              const text = item.textContent.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+              excerpt = text.slice(0, 500) + (text.length > 500 ? '...' : '');
+            }
+            return {
+              id: item.id,
+              case_numbers: caseNumbers,
+              court: courtName,
+              division: divisionName,
+              judgment_type: item.judgmentType,
+              judgment_date: item.judgmentDate,
+              judges: judges.slice(0, 5),
+              keywords: (item.keywords ?? []).slice(0, 10),
+              excerpt,
+              url: `https://www.saos.org.pl/judgments/${item.id}`,
+            };
+          });
+
+          return JSON.stringify({
+            query: saosQuery,
+            total_results: data.info?.totalResults ?? results.length,
+            count: results.length,
+            results,
+          });
+        } catch (err: any) {
+          if (err?.name === 'AbortError') {
+            return JSON.stringify({ error: 'SAOS API nie odpowiedziało w ciągu 15 sekund. Spróbuj ponownie.' });
+          }
+          logger.warn({ err }, 'SAOS API error');
+          return JSON.stringify({ error: 'Nie udało się połączyć z SAOS API. Sprawdź połączenie internetowe.' });
+        }
+      }
+
+      case 'lookup_company': {
+        const companyQuery = requireString(input, 'query');
+        if (!companyQuery) return JSON.stringify({ error: 'Podaj NIP, numer KRS lub nazwę firmy.' });
+        const registry = (optString(input, 'registry') ?? 'auto') as string;
+
+        const results: { source: string; data: any }[] = [];
+
+        // Detect query type
+        const cleanQuery = companyQuery.replace(/[-\s]/g, '');
+        const isNip = /^\d{10}$/.test(cleanQuery);
+        const isKrs = /^\d{10}$/.test(cleanQuery) || /^\d{1,10}$/.test(cleanQuery);
+
+        // KRS lookup via api.dane.gov.pl/1.4/resources/50410,50411/data
+        const shouldSearchKrs = registry === 'krs' || registry === 'auto';
+        const shouldSearchCeidg = registry === 'ceidg' || registry === 'auto';
+
+        if (shouldSearchKrs) {
+          try {
+            const krsParams = new URLSearchParams();
+            if (isNip) {
+              krsParams.set('q', cleanQuery);
+            } else {
+              krsParams.set('q', companyQuery.slice(0, 200));
+            }
+            krsParams.set('page', '1');
+            krsParams.set('per_page', '3');
+
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 10_000);
+            const resp = await fetch(`https://api-krs.ms.gov.pl/api/krs/OdpisPelny/${isKrs && /^\d{10}$/.test(cleanQuery) ? cleanQuery : ''}?rejestr=P&format=json`, {
+              headers: { 'Accept': 'application/json' },
+              signal: controller.signal,
+            }).catch(() => null);
+            clearTimeout(timeout);
+
+            // Fallback: use dane.gov.pl KRS proxy
+            if (!resp || !resp.ok) {
+              const daneController = new AbortController();
+              const daneTimeout = setTimeout(() => daneController.abort(), 10_000);
+              const daneResp = await fetch(`https://api.dane.gov.pl/1.4/resources/50410/data?q=${encodeURIComponent(companyQuery.slice(0, 200))}&page=1&per_page=3&format=json`, {
+                headers: { 'Accept': 'application/json' },
+                signal: daneController.signal,
+              }).catch(() => null);
+              clearTimeout(daneTimeout);
+
+              if (daneResp?.ok) {
+                const daneData = await daneResp.json() as any;
+                const items = daneData?.data ?? [];
+                for (const item of items.slice(0, 3)) {
+                  const attrs = item?.attributes ?? {};
+                  results.push({
+                    source: 'KRS (dane.gov.pl)',
+                    data: {
+                      krs: attrs.krs_podmioty_krs,
+                      nip: attrs.krs_podmioty_nip,
+                      regon: attrs.krs_podmioty_regon,
+                      name: attrs.krs_podmioty_nazwa,
+                      form: attrs.krs_podmioty_forma_prawna,
+                      address: [attrs.krs_podmioty_adres_ulica, attrs.krs_podmioty_adres_numer, attrs.krs_podmioty_adres_kod_pocztowy, attrs.krs_podmioty_adres_miejscowosc].filter(Boolean).join(' '),
+                      registration_date: attrs.krs_podmioty_data_rejestracji,
+                    },
+                  });
+                }
+              }
+            }
+          } catch (err) {
+            logger.warn({ err }, 'KRS lookup error');
+          }
+        }
+
+        if (shouldSearchCeidg && isNip) {
+          try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 10_000);
+            const resp = await fetch(`https://dane.biznes.gov.pl/api/ceidg/v2/firmy?nip=${cleanQuery}`, {
+              headers: { 'Accept': 'application/json' },
+              signal: controller.signal,
+            }).catch(() => null);
+            clearTimeout(timeout);
+
+            if (resp?.ok) {
+              const ceidgData = await resp.json() as any;
+              const firms = ceidgData?.firmy ?? [];
+              for (const firm of firms.slice(0, 3)) {
+                results.push({
+                  source: 'CEIDG',
+                  data: {
+                    name: firm.nazwa,
+                    nip: firm.wlasciciel?.nip,
+                    regon: firm.wlasciciel?.regon,
+                    owner: firm.wlasciciel ? `${firm.wlasciciel.imie} ${firm.wlasciciel.nazwisko}` : undefined,
+                    status: firm.status,
+                    start_date: firm.dataRozpoczecia,
+                    address: firm.adresDzialalnosci ? `${firm.adresDzialalnosci.ulica ?? ''} ${firm.adresDzialalnosci.budynek ?? ''}, ${firm.adresDzialalnosci.kodPocztowy ?? ''} ${firm.adresDzialalnosci.miasto ?? ''}` : undefined,
+                    pkd: firm.pkd,
+                  },
+                });
+              }
+            }
+          } catch (err) {
+            logger.warn({ err }, 'CEIDG lookup error');
+          }
+        }
+
+        if (results.length === 0) {
+          return JSON.stringify({
+            message: `Nie znaleziono danych dla "${companyQuery}" w ${registry === 'auto' ? 'KRS ani CEIDG' : registry.toUpperCase()}.`,
+            hint: isNip ? 'Upewnij się, że NIP jest poprawny.' : 'Spróbuj wyszukać po NIP dla dokładniejszych wyników.',
+          });
+        }
+
+        return JSON.stringify({ query: companyQuery, count: results.length, results });
+      }
+
+      // ===== UPLOADED DOCUMENT ANALYSIS =====
+      case 'get_uploaded_document': {
+        const udDocId = requireString(input, 'id');
+        if (!udDocId) return JSON.stringify({ error: 'ID dokumentu jest wymagane.' });
+        const udDoc = db.getDocument(udDocId);
+        if (!udDoc) return JSON.stringify({ error: 'Dokument nie znaleziony.' });
+        const maxChars = optNumber(input, 'max_chars', 100, 200_000) ?? 10_000;
+        const content = udDoc.content.slice(0, maxChars);
+        const truncated = udDoc.content.length > maxChars;
+        return JSON.stringify({
+          id: udDoc.id,
+          title: udDoc.title,
+          type: udDoc.type,
+          total_chars: udDoc.content.length,
+          truncated,
+          content,
+          hint: truncated ? `Dokument ma ${udDoc.content.length} znaków. Wyświetlono ${maxChars}. Użyj max_chars aby pobrać więcej.` : undefined,
+        });
+      }
+
       // ===== INVOICES =====
       case 'create_invoice': {
         const invClientId = requireString(input, 'client_id');
@@ -1439,7 +1947,7 @@ async function handleWithAnthropic(
     for (const block of assistantContent) {
       if (block.type === 'tool_use' && block.id && block.name) {
         logger.info({ tool: block.name }, 'Executing tool');
-        const result = executeTool(block.name, block.input as Record<string, unknown>, db, session);
+        const result = await executeTool(block.name, block.input as Record<string, unknown>, db, session);
         toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: result });
       }
     }
@@ -1503,7 +2011,7 @@ Jeśli nie musisz używać narzędzia, odpowiedz normalnym tekstem.`;
 
     turns++;
     logger.info({ tool: toolCall.tool }, 'Ollama tool call');
-    const result = executeTool(toolCall.tool, toolCall.input, db, session);
+    const result = await executeTool(toolCall.tool, toolCall.input, db, session);
 
     conversationHistory.push({ role: 'assistant', content: response });
     conversationHistory.push({ role: 'user', content: `Wynik narzędzia ${toolCall.tool}:\n${result}\n\nTeraz odpowiedz użytkownikowi na podstawie wyniku narzędzia.` });

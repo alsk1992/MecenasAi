@@ -663,8 +663,39 @@ class App {
     const displayText = text || (this._pendingAttachment ? '\uD83D\uDCCE ' + this._pendingAttachment.filename : '');
     if (displayText) this.chat.addMessage(displayText, 'user');
     if (this._pendingAttachment) {
-      this.ws.send(text, [this._pendingAttachment]);
+      // Upload file via HTTP, then send reference to agent
+      const att = this._pendingAttachment;
       this._clearFilePreview();
+      try {
+        const binaryStr = atob(att.data);
+        const bytes = new Uint8Array(binaryStr.length);
+        for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+        const uploadUrl = `/api/documents/upload?filename=${encodeURIComponent(att.filename)}`;
+        const uploadResp = await fetch(uploadUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: bytes,
+        });
+        if (!uploadResp.ok) {
+          const err = await uploadResp.json().catch(() => ({}));
+          this.chat.addMessage(err.error || 'Nie udało się przesłać pliku.', 'system');
+          this._sending = false;
+          this._setGenerating(false);
+          return;
+        }
+        const uploadData = await uploadResp.json();
+        const docId = uploadData.document?.id;
+        const chars = uploadData.document?.chars ?? 0;
+        const fileMsg = text
+          ? `${text}\n\n[Przesłano plik: ${att.filename} (${chars} znaków, ID: ${docId}). Użyj get_uploaded_document aby pobrać treść.]`
+          : `Przesłano plik: ${att.filename} (${chars} znaków, ID: ${docId}). Przeanalizuj ten dokument. Użyj get_uploaded_document aby pobrać treść.`;
+        this.ws.send(fileMsg);
+      } catch (uploadErr) {
+        this.chat.addMessage('Błąd przesyłania pliku. Spróbuj ponownie.', 'system');
+        this._sending = false;
+        this._setGenerating(false);
+        return;
+      }
     } else {
       this.ws.send(text);
     }

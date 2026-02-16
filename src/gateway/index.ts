@@ -233,8 +233,14 @@ export async function createGateway(config: Config): Promise<AppGateway> {
               + '  /faktury - Lista faktur\n\n'
               + 'Wyszukiwanie:\n'
               + '  /szukaj <fraza> - Szukaj w kodeksach\n'
-              + '  /art <nr> <kodeks> - Wyszukaj artykul (np. /art 415 KC)\n\n'
+              + '  /art <nr> <kodeks> - Wyszukaj artykul (np. /art 415 KC)\n'
+              + '  /orzeczenia <fraza> - Szukaj orzeczen sadowych (SAOS)\n\n'
+              + 'Kalkulatory:\n'
+              + '  /oplata <kwota> - Oplata sadowa od WPS\n'
+              + '  /odsetki <kwota> <data_od> - Odsetki za opoznienie\n'
+              + '  /przedawnienie <typ> <data> - Termin przedawnienia\n\n'
               + 'Inne:\n'
+              + '  /firma <NIP/nazwa> - Wyszukaj firme w KRS/CEIDG\n'
               + '  /nowa - Nowa rozmowa (czysta sesja)\n'
               + '  /pomoc - Ta wiadomosc'
             );
@@ -379,6 +385,147 @@ export async function createGateway(config: Config): Promise<AppGateway> {
             await ctx.reply(`Faktury (${invoices.length}):\n\n${lines.join('\n')}`);
           });
 
+          // /oplata — court fee calculator
+          telegramBot.command('oplata', async (ctx: any) => {
+            if (!checkTgAuth(ctx)) return;
+            const amount = parseFloat(ctx.match?.trim() ?? '');
+            if (!Number.isFinite(amount) || amount <= 0) {
+              await ctx.reply('Uzycie: /oplata <kwota>\nPrzyklad: /oplata 50000');
+              return;
+            }
+            const fee = Math.min(200000, Math.max(30, Math.round(amount * 0.05)));
+            await ctx.reply(
+              `Oplata sadowa (WPS: ${amount.toLocaleString('pl-PL')} zl):\n\n`
+              + `Oplata stosunkowa (5%): ${fee.toLocaleString('pl-PL')} zl\n`
+              + `Nakazowa (1/4): ${Math.max(30, Math.round(fee * 0.25)).toLocaleString('pl-PL')} zl\n`
+              + `Zazalenie (1/5): ${Math.max(30, Math.round(fee * 0.2)).toLocaleString('pl-PL')} zl\n\n`
+              + `Art. 13 ustawy o kosztach sadowych w sprawach cywilnych`
+            );
+          });
+
+          // /odsetki — interest calculator
+          telegramBot.command('odsetki', async (ctx: any) => {
+            if (!checkTgAuth(ctx)) return;
+            const parts = (ctx.match?.trim() ?? '').split(/\s+/);
+            const principal = parseFloat(parts[0] ?? '');
+            const dateFrom = parts[1];
+            if (!Number.isFinite(principal) || principal <= 0 || !dateFrom || isNaN(Date.parse(dateFrom))) {
+              await ctx.reply('Uzycie: /odsetki <kwota> <data_od>\nPrzyklad: /odsetki 10000 2025-01-15');
+              return;
+            }
+            const days = Math.floor((Date.now() - Date.parse(dateFrom)) / 86_400_000);
+            if (days <= 0) { await ctx.reply('Data musi byc w przeszlosci.'); return; }
+            const interest = principal * (11.25 / 100) * (days / 365);
+            await ctx.reply(
+              `Odsetki ustawowe za opoznienie:\n\n`
+              + `Kapital: ${principal.toLocaleString('pl-PL')} zl\n`
+              + `Okres: ${dateFrom} - dzis (${days} dni)\n`
+              + `Stopa: 11.25% (art. 481 §2 KC)\n`
+              + `Odsetki: ${interest.toFixed(2)} zl\n`
+              + `Razem: ${(principal + interest).toFixed(2)} zl`
+            );
+          });
+
+          // /przedawnienie — limitation calculator
+          telegramBot.command('przedawnienie', async (ctx: any) => {
+            if (!checkTgAuth(ctx)) return;
+            const parts = (ctx.match?.trim() ?? '').split(/\s+/);
+            const claimType = parts[0] ?? '';
+            const dateStr = parts[1] ?? '';
+            if (!claimType || !dateStr || isNaN(Date.parse(dateStr))) {
+              await ctx.reply(
+                'Uzycie: /przedawnienie <typ> <data>\n\n'
+                + 'Typy: ogolne (6 lat), gospodarcze (3), okresowe (3),\n'
+                + 'sprzedaz (2), przewoz (1), delikt (3), praca (3),\n'
+                + 'najem (1), zlecenie (2), dzielo (2)\n\n'
+                + 'Przyklad: /przedawnienie ogolne 2023-06-15'
+              );
+              return;
+            }
+            const rules: Record<string, { years: number; eoy: boolean }> = {
+              ogolne: { years: 6, eoy: true }, gospodarcze: { years: 3, eoy: true },
+              okresowe: { years: 3, eoy: true }, sprzedaz: { years: 2, eoy: true },
+              przewoz: { years: 1, eoy: false }, delikt: { years: 3, eoy: true },
+              praca: { years: 3, eoy: false }, najem: { years: 1, eoy: false },
+              zlecenie: { years: 2, eoy: true }, dzielo: { years: 2, eoy: false },
+            };
+            const rule = rules[claimType] ?? rules.ogolne;
+            const limitDate = new Date(Date.parse(dateStr));
+            limitDate.setFullYear(limitDate.getFullYear() + rule.years);
+            if (rule.eoy) { limitDate.setMonth(11); limitDate.setDate(31); }
+            const expired = limitDate < new Date();
+            const daysLeft = expired ? 0 : Math.ceil((limitDate.getTime() - Date.now()) / 86_400_000);
+            await ctx.reply(
+              `Przedawnienie (${claimType}):\n\n`
+              + `Data wymagalnosci: ${dateStr}\n`
+              + `Termin: ${rule.years} lat${rule.eoy ? ' (koniec roku)' : ''}\n`
+              + `Przedawnia sie: ${limitDate.toISOString().slice(0, 10)}\n`
+              + (expired ? 'ROSZCZENIE PRZEDAWNIONE' : `Pozostalo: ${daysLeft} dni`)
+            );
+          });
+
+          // /orzeczenia — SAOS court decisions search
+          telegramBot.command('orzeczenia', async (ctx: any) => {
+            if (!checkTgAuth(ctx)) return;
+            const query = ctx.match?.trim() ?? '';
+            if (!query) {
+              await ctx.reply('Uzycie: /orzeczenia <fraza>\nPrzyklad: /orzeczenia odszkodowanie blad medyczny');
+              return;
+            }
+            try {
+              const controller = new AbortController();
+              const timeout = setTimeout(() => controller.abort(), 15_000);
+              const resp = await fetch(`https://www.saos.org.pl/api/search/judgments?all=${encodeURIComponent(query)}&pageSize=5&sortingField=JUDGMENT_DATE&sortingDirection=DESC`, {
+                headers: { 'Accept': 'application/json' },
+                signal: controller.signal,
+              });
+              clearTimeout(timeout);
+              if (!resp.ok) { await ctx.reply('Blad SAOS API. Sprobuj ponownie.'); return; }
+              const data = await resp.json() as any;
+              const items = data.items ?? [];
+              if (items.length === 0) { await ctx.reply('Nie znaleziono orzeczen.'); return; }
+              const lines = items.slice(0, 5).map((item: any) => {
+                const caseNums = (item.courtCases ?? []).map((c: any) => c.caseNumber).join(', ');
+                const court = item.division?.court?.name ?? '';
+                return `${caseNums} (${item.judgmentDate ?? ''})\n  ${court}`;
+              });
+              const total = data.info?.totalResults ?? items.length;
+              await ctx.reply(`Orzeczenia "${query}" (${total} wynikow):\n\n${lines.join('\n\n')}\n\nWiecej: saos.org.pl`);
+            } catch {
+              await ctx.reply('Nie udalo sie polaczyc z SAOS. Sprawdz polaczenie.');
+            }
+          });
+
+          // /firma — KRS/CEIDG lookup
+          telegramBot.command('firma', async (ctx: any) => {
+            if (!checkTgAuth(ctx)) return;
+            const query = ctx.match?.trim() ?? '';
+            if (!query) {
+              await ctx.reply('Uzycie: /firma <NIP lub nazwa>\nPrzyklad: /firma 5261040828');
+              return;
+            }
+            try {
+              const controller = new AbortController();
+              const timeout = setTimeout(() => controller.abort(), 10_000);
+              const resp = await fetch(`https://api.dane.gov.pl/1.4/resources/50410/data?q=${encodeURIComponent(query)}&page=1&per_page=3&format=json`, {
+                headers: { 'Accept': 'application/json' },
+                signal: controller.signal,
+              });
+              clearTimeout(timeout);
+              if (!resp.ok) { await ctx.reply('Blad API. Sprobuj ponownie.'); return; }
+              const data = await resp.json() as any;
+              const items = data?.data ?? [];
+              if (items.length === 0) { await ctx.reply(`Nie znaleziono "${query}" w KRS.`); return; }
+              const lines = items.slice(0, 3).map((item: any) => {
+                const a = item.attributes ?? {};
+                return `${a.krs_podmioty_nazwa ?? '?'}\nKRS: ${a.krs_podmioty_krs ?? '-'} | NIP: ${a.krs_podmioty_nip ?? '-'}\n${a.krs_podmioty_adres_miejscowosc ?? ''}`;
+              });
+              await ctx.reply(`Wyniki KRS:\n\n${lines.join('\n\n')}`);
+            } catch {
+              await ctx.reply('Nie udalo sie polaczyc z KRS. Sprawdz polaczenie.');
+            }
+          });
+
           // Generic text messages — forward to agent
           telegramBot.on('message:text', async (ctx: any) => {
             if (!checkTgAuth(ctx)) return;
@@ -392,6 +539,75 @@ export async function createGateway(config: Config): Promise<AppGateway> {
               text: ctx.message.text,
               timestamp: new Date(ctx.message.date * 1000),
             });
+          });
+
+          // Handle document uploads via Telegram
+          telegramBot.on('message:document', async (ctx: any) => {
+            if (!checkTgAuth(ctx)) return;
+            try {
+              const doc = ctx.message.document;
+              const filename = doc.file_name ?? 'dokument';
+              const ext = filename.split('.').pop()?.toLowerCase() ?? '';
+              if (!['pdf', 'docx', 'txt', 'md', 'csv'].includes(ext)) {
+                await ctx.reply(`Nieobslugiwany format pliku (.${ext}). Obslugiwane: PDF, DOCX, TXT.`);
+                return;
+              }
+              if (doc.file_size > 10 * 1024 * 1024) {
+                await ctx.reply('Plik za duzy (maks. 10 MB).');
+                return;
+              }
+              await ctx.reply('Przetwarzam plik...');
+              const file = await ctx.getFile();
+              const fileUrl = `https://api.telegram.org/file/bot${config.channels.telegram!.token}/${file.file_path}`;
+              const resp = await fetch(fileUrl);
+              if (!resp.ok) { await ctx.reply('Nie udalo sie pobrac pliku.'); return; }
+              const buffer = Buffer.from(await resp.arrayBuffer());
+
+              let extractedText = '';
+              if (ext === 'pdf') {
+                const { extractText } = await import('unpdf');
+                const pdfResult = await extractText(buffer);
+                const pdfText = pdfResult.text;
+                extractedText = Array.isArray(pdfText) ? pdfText.join('\n') : String(pdfText ?? '');
+              } else if (ext === 'docx') {
+                const mammoth = await import('mammoth') as any;
+                const result = await mammoth.extractRawText({ buffer });
+                extractedText = result.value ?? '';
+              } else {
+                extractedText = buffer.toString('utf-8');
+              }
+
+              if (!extractedText.trim()) {
+                await ctx.reply('Plik nie zawiera tekstu.');
+                return;
+              }
+
+              const savedDoc = db.createDocument({
+                type: 'inne',
+                title: `[Przeslany] ${filename}`,
+                content: extractedText.slice(0, 200_000),
+                status: 'szkic',
+                version: 1,
+              });
+
+              const caption = ctx.message.caption ?? '';
+              const msg = caption
+                ? `${caption}\n\n[Przeslano plik: ${filename} (${extractedText.length} znakow, ID: ${savedDoc.id}). Uzyj get_uploaded_document aby pobrac tresc.]`
+                : `Przeslano plik: ${filename} (${extractedText.length} znakow, ID: ${savedDoc.id}). Przeanalizuj ten dokument. Uzyj get_uploaded_document aby pobrac tresc.`;
+
+              await handleMessage({
+                id: String(ctx.message.message_id),
+                platform: 'telegram',
+                userId: String(ctx.from.id),
+                chatId: String(ctx.chat.id),
+                chatType: ctx.chat.type === 'private' ? 'dm' : 'group',
+                text: msg,
+                timestamp: new Date(ctx.message.date * 1000),
+              });
+            } catch (err: any) {
+              logger.warn({ err }, 'Telegram document upload error');
+              await ctx.reply('Blad przetwarzania pliku: ' + (err?.message?.slice(0, 100) ?? 'nieznany'));
+            }
           });
 
           telegramBot.start();

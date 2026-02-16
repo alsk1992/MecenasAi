@@ -140,6 +140,9 @@ export class Sidebar {
       newInvoiceBtn.addEventListener('click', () => this.onNewInvoice?.());
     }
 
+    // ── Tool Calculator Handlers ──
+    this._initToolCalculators();
+
     // Context menu (right-click on sessions)
     this._contextMenu = null;
     document.addEventListener('click', () => this._hideContextMenu());
@@ -169,8 +172,11 @@ export class Sidebar {
         documents: 'Szukaj dokumentów...',
         deadlines: 'Szukaj terminów...',
         invoices: 'Szukaj faktur...',
+        tools: '',
       };
       this.searchEl.placeholder = placeholders[tab] || 'Szukaj...';
+      // Hide search for tools tab (not searchable)
+      this.searchEl.parentElement.style.display = tab === 'tools' ? 'none' : '';
     }
 
     // Fetch data when switching to API-backed tabs
@@ -1085,6 +1091,161 @@ export class Sidebar {
           if (saveBtn) saveBtn.textContent = 'Zapisz zmiany';
         }, 3000);
       }
+    }
+  }
+
+  // ── Tool Calculators ──
+  _initToolCalculators() {
+    // Court fee calculator
+    const wpsCalc = document.getElementById('tool-wps-calc');
+    if (wpsCalc) {
+      wpsCalc.addEventListener('click', () => {
+        const amount = parseFloat(document.getElementById('tool-wps-input')?.value ?? '');
+        const resultEl = document.getElementById('tool-wps-result');
+        if (!resultEl) return;
+        if (!Number.isFinite(amount) || amount < 0) {
+          resultEl.innerHTML = '<span class="result-warning">Podaj prawidłową kwotę</span>';
+          return;
+        }
+        const fee = Math.min(200000, Math.max(30, Math.round(amount * 0.05)));
+        const nakazowa = Math.max(30, Math.round(fee * 0.25));
+        const zazalenie = Math.max(30, Math.round(fee * 0.2));
+        resultEl.innerHTML = `<span class="result-value">${fee.toLocaleString('pl-PL')} zł</span>\n`
+          + `Opłata stosunkowa (5% WPS)\n`
+          + `Nakazowa (¼): ${nakazowa.toLocaleString('pl-PL')} zł\n`
+          + `Zażalenie (⅕): ${zazalenie.toLocaleString('pl-PL')} zł\n`
+          + `<span class="result-basis">Art. 13 ustawy o kosztach sądowych w sprawach cywilnych</span>`;
+      });
+    }
+
+    // Interest calculator
+    const intCalc = document.getElementById('tool-interest-calc');
+    if (intCalc) {
+      intCalc.addEventListener('click', () => {
+        const principal = parseFloat(document.getElementById('tool-interest-amount')?.value ?? '');
+        const fromStr = document.getElementById('tool-interest-from')?.value ?? '';
+        const type = document.getElementById('tool-interest-type')?.value ?? 'za_opoznienie';
+        const resultEl = document.getElementById('tool-interest-result');
+        if (!resultEl) return;
+        if (!Number.isFinite(principal) || principal <= 0) {
+          resultEl.innerHTML = '<span class="result-warning">Podaj prawidłową kwotę</span>';
+          return;
+        }
+        const fromMs = Date.parse(fromStr);
+        if (isNaN(fromMs)) {
+          resultEl.innerHTML = '<span class="result-warning">Podaj datę początkową</span>';
+          return;
+        }
+        const rates = { ustawowe: 9.25, za_opoznienie: 11.25, handlowe: 15.75 };
+        const labels = { ustawowe: 'kapitałowe', za_opoznienie: 'za opóźnienie', handlowe: 'w transakcjach handlowych' };
+        const rate = rates[type] ?? 11.25;
+        const days = Math.floor((Date.now() - fromMs) / 86_400_000);
+        if (days <= 0) {
+          resultEl.innerHTML = '<span class="result-warning">Data musi być w przeszłości</span>';
+          return;
+        }
+        const interest = principal * (rate / 100) * (days / 365);
+        const total = principal + interest;
+        resultEl.innerHTML = `<span class="result-value">${interest.toFixed(2)} zł</span>\n`
+          + `Odsetki ${labels[type] ?? type} (${rate}%)\n`
+          + `Okres: ${days} dni\n`
+          + `Razem z kapitałem: ${total.toFixed(2)} zł\n`
+          + `<span class="result-basis">Art. ${type === 'ustawowe' ? '359' : type === 'handlowe' ? '4 ustawy o terminach zapłaty' : '481'} KC</span>`;
+      });
+    }
+
+    // Limitation calculator
+    const limCalc = document.getElementById('tool-limit-calc');
+    if (limCalc) {
+      limCalc.addEventListener('click', () => {
+        const claimType = document.getElementById('tool-limit-type')?.value ?? 'ogolne';
+        const dateStr = document.getElementById('tool-limit-date')?.value ?? '';
+        const resultEl = document.getElementById('tool-limit-result');
+        if (!resultEl) return;
+        const dateMs = Date.parse(dateStr);
+        if (isNaN(dateMs)) {
+          resultEl.innerHTML = '<span class="result-warning">Podaj datę wymagalności</span>';
+          return;
+        }
+        const rules = {
+          ogolne: { years: 6, eoy: true }, gospodarcze: { years: 3, eoy: true },
+          okresowe: { years: 3, eoy: true }, sprzedaz: { years: 2, eoy: true },
+          przewoz: { years: 1, eoy: false }, delikt: { years: 3, eoy: true },
+          praca_wynagrodzenie: { years: 3, eoy: false }, najem: { years: 1, eoy: false },
+          zlecenie: { years: 2, eoy: true }, dzielo_wada: { years: 2, eoy: false },
+        };
+        const rule = rules[claimType] ?? rules.ogolne;
+        const limitDate = new Date(dateMs);
+        limitDate.setFullYear(limitDate.getFullYear() + rule.years);
+        if (rule.eoy) { limitDate.setMonth(11); limitDate.setDate(31); }
+        const expired = limitDate < new Date();
+        const daysLeft = expired ? 0 : Math.ceil((limitDate.getTime() - Date.now()) / 86_400_000);
+        resultEl.innerHTML = `Przedawnia się: <span class="result-value">${limitDate.toLocaleDateString('pl-PL')}</span>\n`
+          + `Termin: ${rule.years} lat${rule.eoy ? ' (koniec roku)' : ''}\n`
+          + (expired
+            ? '<span class="result-warning">ROSZCZENIE PRZEDAWNIONE</span>'
+            : `<span class="result-ok">Pozostało: ${daysLeft} dni</span>`);
+      });
+    }
+
+    // SAOS search
+    const saosSearch = document.getElementById('tool-saos-search');
+    if (saosSearch) {
+      saosSearch.addEventListener('click', async () => {
+        const query = document.getElementById('tool-saos-query')?.value?.trim() ?? '';
+        const resultEl = document.getElementById('tool-saos-result');
+        if (!resultEl) return;
+        if (!query) { resultEl.innerHTML = '<span class="result-warning">Podaj frazę wyszukiwania</span>'; return; }
+        resultEl.innerHTML = 'Szukam...';
+        try {
+          const r = await fetch(`https://www.saos.org.pl/api/search/judgments?all=${encodeURIComponent(query)}&pageSize=5&sortingField=JUDGMENT_DATE&sortingDirection=DESC`, {
+            headers: { 'Accept': 'application/json' },
+          });
+          if (!r.ok) { resultEl.innerHTML = '<span class="result-warning">Błąd SAOS API</span>'; return; }
+          const data = await r.json();
+          const items = data.items ?? [];
+          if (items.length === 0) { resultEl.innerHTML = 'Brak wyników.'; return; }
+          const total = data.info?.totalResults ?? items.length;
+          resultEl.innerHTML = `<strong>${total.toLocaleString('pl-PL')} wyników</strong>\n\n`
+            + items.slice(0, 5).map(item => {
+              const caseNums = (item.courtCases ?? []).map(c => c.caseNumber).join(', ');
+              const court = item.division?.court?.name ?? '';
+              return `<div class="saos-item"><span class="saos-case-num">${caseNums}</span> (${item.judgmentDate ?? ''})\n${court}\n<a href="https://www.saos.org.pl/judgments/${item.id}" target="_blank">Zobacz →</a></div>`;
+            }).join('');
+        } catch {
+          resultEl.innerHTML = '<span class="result-warning">Nie udało się połączyć z SAOS</span>';
+        }
+      });
+    }
+
+    // Company lookup
+    const compSearch = document.getElementById('tool-company-search');
+    if (compSearch) {
+      compSearch.addEventListener('click', async () => {
+        const query = document.getElementById('tool-company-query')?.value?.trim() ?? '';
+        const resultEl = document.getElementById('tool-company-result');
+        if (!resultEl) return;
+        if (!query) { resultEl.innerHTML = '<span class="result-warning">Podaj NIP lub nazwę</span>'; return; }
+        resultEl.innerHTML = 'Szukam...';
+        try {
+          const r = await fetch(`https://api.dane.gov.pl/1.4/resources/50410/data?q=${encodeURIComponent(query)}&page=1&per_page=3&format=json`, {
+            headers: { 'Accept': 'application/json' },
+          });
+          if (!r.ok) { resultEl.innerHTML = '<span class="result-warning">Błąd API</span>'; return; }
+          const data = await r.json();
+          const items = data?.data ?? [];
+          if (items.length === 0) { resultEl.innerHTML = `Nie znaleziono "${query}".`; return; }
+          resultEl.innerHTML = items.slice(0, 3).map(item => {
+            const a = item.attributes ?? {};
+            return `<strong>${a.krs_podmioty_nazwa ?? '?'}</strong>\n`
+              + `KRS: ${a.krs_podmioty_krs ?? '-'} | NIP: ${a.krs_podmioty_nip ?? '-'}\n`
+              + `REGON: ${a.krs_podmioty_regon ?? '-'}\n`
+              + `${a.krs_podmioty_adres_miejscowosc ?? ''}`;
+          }).join('\n\n');
+        } catch {
+          resultEl.innerHTML = '<span class="result-warning">Nie udało się połączyć z KRS</span>';
+        }
+      });
     }
   }
 }
