@@ -13,6 +13,7 @@ import { logger } from '../utils/logger.js';
 import { generateId } from '../utils/id.js';
 import type { Config, IncomingMessage } from '../types.js';
 import type { Database } from '../db/index.js';
+import { detectPii } from '../privacy/detector.js';
 
 interface WebChatCallbacks {
   onWebChatMessage: (message: IncomingMessage) => Promise<void>;
@@ -910,6 +911,58 @@ export function createServer(config: Config, db: Database): HttpServer {
           return;
         }
 
+        // ── Privacy Status ──
+        if (pathname === '/api/privacy/status' && req.method === 'GET') {
+          if (!checkApiAuth(req)) {
+            res.writeHead(401, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Unauthorized' }));
+            return;
+          }
+          // Check if Ollama is reachable (async, use .then)
+          const ollamaCheck = new Promise<boolean>((resolve) => {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => { controller.abort(); resolve(false); }, 3_000);
+            fetch(`${config.agent.ollamaUrl}/api/tags`, { signal: controller.signal })
+              .then(r => { clearTimeout(timeout); resolve(r.ok); })
+              .catch(() => { clearTimeout(timeout); resolve(false); });
+          });
+          ollamaCheck.then((ollamaUp) => {
+            if (res.headersSent) return;
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              mode: config.privacy.mode,
+              blockCloudOnPii: config.privacy.blockCloudOnPii,
+              anonymizeForCloud: config.privacy.anonymizeForCloud,
+              stripActiveCaseForCloud: config.privacy.stripActiveCaseForCloud,
+              ollamaAvailable: ollamaUp,
+              anthropicConfigured: !!config.agent.anthropicKey,
+            }));
+          });
+          return;
+        }
+
+        // ── Privacy PII Check (POST) ──
+        if (pathname === '/api/privacy/check' && req.method === 'POST') {
+          if (!checkApiAuth(req)) {
+            res.writeHead(401, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Unauthorized' }));
+            return;
+          }
+          readJsonBody(req, res, (data) => {
+            const text = String(data.text ?? '').slice(0, 100_000);
+            const result = detectPii(text);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              hasPii: result.hasPii,
+              hasSensitiveKeywords: result.hasSensitiveKeywords,
+              piiTypes: [...new Set(result.matches.map(m => m.type))],
+              keywords: result.keywords,
+              matchCount: result.matches.length,
+            }));
+          });
+          return;
+        }
+
         // 404
         res.writeHead(404, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Not found' }));
@@ -1041,7 +1094,23 @@ export function createServer(config: Config, db: Database): HttpServer {
               return;
             }
 
+            // Privacy mode toggle (stored in session metadata)
+            if (msg.type === 'privacy_mode') {
+              const mode = String(msg.mode ?? '').trim();
+              if (!['auto', 'strict', 'off'].includes(mode)) {
+                ws.send(JSON.stringify({ type: 'error', message: 'Tryb prywatności musi być: auto, strict lub off.' }));
+                return;
+              }
+              // Store in per-connection metadata — onWebChatMessage will pick it up via session
+              (ws as any)._privacyMode = mode;
+              ws.send(JSON.stringify({ type: 'privacy_mode_set', mode }));
+              logger.info({ chatId, mode }, 'Privacy mode changed');
+              return;
+            }
+
             if (msg.type === 'message' && msg.text) {
+              // Pass per-connection privacy mode in message metadata
+              const privacyMode = (ws as any)._privacyMode as string | undefined;
               await callbacks.onWebChatMessage({
                 id: `wc_${Date.now()}`,
                 platform: 'webchat',
@@ -1050,6 +1119,7 @@ export function createServer(config: Config, db: Database): HttpServer {
                 chatType: 'dm',
                 text: msg.text,
                 timestamp: new Date(),
+                metadata: privacyMode ? { privacyMode } : undefined,
               });
             }
           } catch (err) {

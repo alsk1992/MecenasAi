@@ -8,6 +8,8 @@ import Anthropic from '@anthropic-ai/sdk';
 import { logger } from '../utils/logger.js';
 import type { Config, Session } from '../types.js';
 import type { Database } from '../db/index.js';
+import { detectPii, containsSensitiveData } from '../privacy/detector.js';
+import { Anonymizer } from '../privacy/anonymizer.js';
 
 // =============================================================================
 // SYSTEM PROMPT
@@ -1936,6 +1938,80 @@ async function checkOllamaModel(ollamaUrl: string, model: string): Promise<boole
 }
 
 // =============================================================================
+// PRIVACY-AWARE ROUTING
+// =============================================================================
+
+type PrivacyDecision = 'local' | 'cloud_anonymized' | 'refuse';
+
+/**
+ * Classify privacy sensitivity of the current request.
+ * Scans: current message, active case context, recent conversation history.
+ */
+function classifyPrivacy(
+  text: string,
+  session: Session,
+  config: Config,
+  db: Database
+): { decision: PrivacyDecision; reason: string } {
+  const mode = (session.metadata?.privacyMode as string) ?? config.privacy.mode;
+
+  // Off = no protection
+  if (mode === 'off') {
+    return { decision: 'cloud_anonymized', reason: 'privacy_off' };
+  }
+
+  // Check current message for PII
+  const msgResult = detectPii(text);
+  let hasPii = msgResult.hasPii || msgResult.hasSensitiveKeywords;
+
+  // Active case context = always sensitive (contains client name, case details)
+  const activeCaseId = session.metadata?.activeCaseId as string | undefined;
+  if (activeCaseId) {
+    const activeCase = db.getCase(activeCaseId);
+    if (activeCase) {
+      hasPii = true; // Active case always has client PII in system prompt
+    }
+  }
+
+  // Scan last 10 conversation messages for PII
+  if (!hasPii) {
+    const recentMessages = (session.messages ?? []).slice(-10);
+    for (const msg of recentMessages) {
+      if (containsSensitiveData(msg.content)) {
+        hasPii = true;
+        break;
+      }
+    }
+  }
+
+  // Strict mode = always local
+  if (mode === 'strict') {
+    return { decision: 'local', reason: 'strict_mode' };
+  }
+
+  // Auto mode with PII detected = force local
+  if (hasPii) {
+    return { decision: 'local', reason: 'pii_detected' };
+  }
+
+  // Auto mode, no PII = cloud is OK (with anonymization as safety net)
+  return { decision: 'cloud_anonymized', reason: 'no_pii' };
+}
+
+/** Quick probe: is Ollama reachable? */
+async function isOllamaUp(ollamaUrl: string): Promise<boolean> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3_000);
+    const resp = await fetch(`${ollamaUrl}/api/tags`, { signal: controller.signal });
+    clearTimeout(timeout);
+    return resp.ok;
+  } catch {
+    return false;
+  }
+}
+
+// =============================================================================
 // AGENT
 // =============================================================================
 
@@ -1949,7 +2025,58 @@ export function createAgent(config: Config, db: Database): Agent {
 
   return {
     async handleMessage(text: string, session: Session): Promise<string | null> {
-      // If using Anthropic as primary, skip model routing
+      // --- Privacy-aware routing ---
+      const privacy = classifyPrivacy(text, session, config, db);
+
+      if (privacy.decision === 'local' || privacy.decision === 'refuse') {
+        // Must use local model — check if Ollama is available
+        const ollamaUp = await isOllamaUp(config.agent.ollamaUrl);
+
+        if (!ollamaUp) {
+          if (privacy.decision === 'refuse') {
+            return '⚠️ **Ochrona prywatności**: Wykryto dane wrażliwe, a lokalny model AI (Ollama) jest niedostępny. Nie mogę przetworzyć tej wiadomości przez zewnętrzny serwer ze względu na tajemnicę adwokacką. Uruchom Ollama (`ollama serve`) i spróbuj ponownie.';
+          }
+          // decision === 'local' (PII detected, Ollama down)
+          if (config.privacy.blockCloudOnPii) {
+            logger.warn({ reason: privacy.reason }, 'Wykryto dane wrażliwe — Ollama niedostępna, blokuję przekazanie do chmury');
+            return '⚠️ **Ochrona prywatności**: Wykryto dane osobowe (PESEL, NIP, dane klienta) w wiadomości lub kontekście aktywnej sprawy. Lokalny model AI (Ollama) jest niedostępny. Ze względu na ochronę tajemnicy adwokackiej nie mogę przekazać tych danych do zewnętrznego serwera. Uruchom Ollama (`ollama serve`) lub wyłącz kontekst aktywnej sprawy (`/clear`).';
+          }
+          // blockCloudOnPii=false → fall through to cloud with anonymization
+        } else {
+          // Ollama is up — route locally
+          if (privacy.reason === 'pii_detected' || privacy.reason === 'strict_mode') {
+            logger.info({ reason: privacy.reason }, 'Wykryto dane wrażliwe — wymuszam routing lokalny');
+          }
+
+          // Check speed model availability once
+          if (speedModelAvailable === null && speedModel) {
+            speedModelAvailable = await checkOllamaModel(config.agent.ollamaUrl, speedModel);
+            if (speedModelAvailable) {
+              logger.info({ speedModel }, 'Speed model dostępny — routing aktywny');
+            } else {
+              logger.info({ speedModel }, 'Speed model niedostępny — użyj: ollama pull ' + speedModel);
+            }
+          }
+
+          const useSpeed = speedModelAvailable && speedModel && isSimpleQuery(text);
+          const modelToUse = useSpeed ? speedModel : config.agent.model;
+
+          try {
+            return await handleWithOllama(text, session, config, db, modelToUse);
+          } catch (err) {
+            // If Ollama fails and PII is present, refuse — do NOT fall back to cloud
+            if (privacy.reason === 'pii_detected' || privacy.reason === 'strict_mode') {
+              logger.error({ err }, 'Ollama error z danymi wrażliwymi — odmowa');
+              return '⚠️ **Ochrona prywatności**: Lokalny model AI zwrócił błąd. Ze względu na dane wrażliwe w wiadomości nie mogę przełączyć na model zewnętrzny. Spróbuj ponownie.';
+            }
+            throw err;
+          }
+        }
+      }
+
+      // --- Cloud path (no PII, or privacy=off, or blockCloudOnPii=false) ---
+
+      // If using Anthropic as primary, skip Ollama
       if (config.agent.provider === 'anthropic' && config.agent.anthropicKey) {
         return handleWithAnthropic(text, session, config, db);
       }
@@ -2015,11 +2142,31 @@ async function handleWithAnthropic(
 ): Promise<string | null> {
   const client = new Anthropic({ apiKey: config.agent.anthropicKey });
 
+  // --- Privacy: create per-request anonymizer ---
+  const shouldAnonymize = config.privacy.mode !== 'off' && config.privacy.anonymizeForCloud;
+  const anonymizer = shouldAnonymize ? new Anonymizer() : null;
+
+  // --- Build system prompt (strip active case context for cloud if configured) ---
+  let systemPrompt: string;
+  if (config.privacy.mode !== 'off' && config.privacy.stripActiveCaseForCloud) {
+    // Use base prompt only — no active case context to prevent client PII leaking
+    systemPrompt = SYSTEM_PROMPT;
+  } else {
+    systemPrompt = buildSystemPrompt(session, db);
+  }
+  if (anonymizer) systemPrompt = anonymizer.anonymize(systemPrompt);
+
+  // --- Build message history (anonymized) ---
   const messages: Array<{ role: 'user' | 'assistant'; content: any }> = [];
   for (const msg of (session.messages ?? []).slice(-20)) {
     if (msg.role === 'user' || msg.role === 'assistant') {
-      messages.push({ role: msg.role, content: msg.content });
+      const content = anonymizer ? anonymizer.anonymize(msg.content) : msg.content;
+      messages.push({ role: msg.role, content });
     }
+  }
+
+  if (anonymizer && anonymizer.hasReplacements) {
+    logger.info({ mappings: anonymizer.mappingCount }, 'Anonimizacja PII przed wysłaniem do Anthropic');
   }
 
   const anthropicTools = TOOLS.map(t => ({
@@ -2027,8 +2174,6 @@ async function handleWithAnthropic(
     description: t.description,
     input_schema: t.input_schema as any,
   }));
-
-  const systemPrompt = buildSystemPrompt(session, db);
 
   const anthropicModel = config.agent.model.startsWith('claude') ? config.agent.model : 'claude-sonnet-4-5-20250929';
   if (!config.agent.model.startsWith('claude')) {
@@ -2054,8 +2199,17 @@ async function handleWithAnthropic(
     for (const block of assistantContent) {
       if (block.type === 'tool_use' && block.id && block.name) {
         logger.info({ tool: block.name }, 'Executing tool');
-        const result = await executeTool(block.name, block.input as Record<string, unknown>, db, session);
-        toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: result });
+        // De-anonymize tool input so DB operations use real values
+        let toolInput = block.input as Record<string, unknown>;
+        if (anonymizer) {
+          const rawJson = JSON.stringify(toolInput);
+          const deAnon = anonymizer.deanonymize(rawJson);
+          try { toolInput = JSON.parse(deAnon); } catch { /* use original */ }
+        }
+        const result = await executeTool(block.name, toolInput, db, session);
+        // Re-anonymize tool result before sending back to cloud
+        const anonResult = anonymizer ? anonymizer.anonymize(result) : result;
+        toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: anonResult });
       }
     }
 
@@ -2064,18 +2218,30 @@ async function handleWithAnthropic(
 
     messages.push({ role: 'user', content: toolResults as any });
 
+    // Re-build system prompt (still stripped for cloud)
+    const loopSystemPrompt = (config.privacy.mode !== 'off' && config.privacy.stripActiveCaseForCloud)
+      ? SYSTEM_PROMPT
+      : buildSystemPrompt(session, db);
+    const anonLoopSystem = anonymizer ? anonymizer.anonymize(loopSystemPrompt) : loopSystemPrompt;
+
     response = await client.messages.create({
       model: anthropicModel,
       max_tokens: config.agent.maxTokens,
       temperature: config.agent.temperature,
-      system: buildSystemPrompt(session, db),
+      system: anonLoopSystem,
       tools: anthropicTools,
       messages,
     });
   }
 
   const textBlocks = response.content.filter((b: any) => b.type === 'text');
-  return textBlocks.map((b: any) => b.text ?? '').filter(Boolean).join('\n') || null;
+  const rawResponse = textBlocks.map((b: any) => b.text ?? '').filter(Boolean).join('\n') || null;
+
+  // De-anonymize the response before returning to user
+  if (rawResponse && anonymizer) {
+    return anonymizer.deanonymize(rawResponse);
+  }
+  return rawResponse;
 }
 
 // =============================================================================

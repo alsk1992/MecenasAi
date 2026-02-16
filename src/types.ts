@@ -269,12 +269,25 @@ export interface Invoice {
 // CONFIG
 // =============================================================================
 
+export type PrivacyMode = 'auto' | 'strict' | 'off';
+
+export interface PrivacyConfig {
+  mode: PrivacyMode;
+  /** Block cloud provider entirely when PII is detected (default: true) */
+  blockCloudOnPii: boolean;
+  /** Anonymize PII before sending to cloud (default: true) */
+  anonymizeForCloud: boolean;
+  /** Strip active case context from system prompt for cloud (default: true) */
+  stripActiveCaseForCloud: boolean;
+}
+
 export interface Config {
   agent: AgentConfig;
   gateway: GatewayConfig;
   channels: ChannelsConfig;
   session?: SessionConfig;
   http?: HttpConfig;
+  privacy: PrivacyConfig;
 }
 
 export interface AgentConfig {

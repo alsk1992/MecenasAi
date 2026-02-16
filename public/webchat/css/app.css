@@ -803,6 +803,34 @@ body {
 .status-dot.connected { background: var(--green); box-shadow: 0 0 8px rgba(52, 211, 153, 0.5); }
 .status-dot.error { background: var(--red); }
 
+/* ── Privacy Indicator ── */
+.privacy-indicator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 4px 6px;
+  transition: all 0.2s;
+  flex-shrink: 0;
+}
+.privacy-indicator:hover { border-color: var(--border-hover); color: var(--text-primary); }
+.privacy-indicator.privacy-auto { color: var(--green); border-color: rgba(52, 211, 153, 0.3); }
+.privacy-indicator.privacy-auto:hover { border-color: var(--green); }
+.privacy-indicator.privacy-strict { color: var(--cyan); border-color: rgba(34, 211, 238, 0.3); }
+.privacy-indicator.privacy-strict:hover { border-color: var(--cyan); }
+.privacy-indicator.privacy-off { color: var(--text-dim); border-color: var(--border); opacity: 0.5; }
+.privacy-indicator.privacy-off:hover { opacity: 0.8; }
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 /* ── Reconnect Banner ── */
 .reconnect-banner {
   display: none;

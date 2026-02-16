@@ -90,6 +90,12 @@ export async function createGateway(config: Config): Promise<AppGateway> {
   async function handleMessage(message: IncomingMessage): Promise<void> {
     const session = getOrCreateSession(message);
 
+    // Propagate privacy mode from message metadata to session
+    if (message.metadata?.privacyMode) {
+      if (!session.metadata) session.metadata = {};
+      session.metadata.privacyMode = message.metadata.privacyMode;
+    }
+
     // Add user message to history
     session.messages.push({
       role: 'user',

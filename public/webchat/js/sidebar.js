@@ -904,6 +904,49 @@ export class Sidebar {
 
     const frag = document.createDocumentFragment();
 
+    // ── Privacy section (client-side setting) ──
+    const privacySection = document.createElement('div');
+    privacySection.className = 'settings-category';
+    const privacyLabel = document.createElement('div');
+    privacyLabel.className = 'settings-category-label';
+    privacyLabel.textContent = 'Prywatność';
+    privacySection.appendChild(privacyLabel);
+
+    const privacyField = document.createElement('div');
+    privacyField.className = 'settings-field';
+    const privacyHeader = document.createElement('div');
+    privacyHeader.className = 'settings-field-header';
+    const privacyFieldLabel = document.createElement('label');
+    privacyFieldLabel.className = 'settings-field-label';
+    privacyFieldLabel.textContent = 'Tryb ochrony danych';
+    privacyHeader.appendChild(privacyFieldLabel);
+    privacyField.appendChild(privacyHeader);
+
+    const privacyDesc = document.createElement('div');
+    privacyDesc.className = 'settings-env-name';
+    privacyDesc.textContent = 'Kontroluje, czy dane klientów mogą być wysyłane do zewnętrznych modeli AI';
+    privacyField.appendChild(privacyDesc);
+
+    const privacySelect = document.createElement('select');
+    privacySelect.className = 'settings-input';
+    const currentMode = Storage.get('privacyMode') || 'auto';
+    for (const [val, label] of [['auto', 'Auto — dane wrażliwe → lokalny model'], ['strict', 'Ścisły — zawsze lokalny model'], ['off', 'Wyłączony — bez ochrony']]) {
+      const opt = document.createElement('option');
+      opt.value = val;
+      opt.textContent = label;
+      if (val === currentMode) opt.selected = true;
+      privacySelect.appendChild(opt);
+    }
+    privacySelect.addEventListener('change', () => {
+      const mode = privacySelect.value;
+      Storage.set('privacyMode', mode);
+      // Dispatch custom event so App can pick it up
+      document.dispatchEvent(new CustomEvent('privacy-mode-change', { detail: { mode } }));
+    });
+    privacyField.appendChild(privacySelect);
+    privacySection.appendChild(privacyField);
+    frag.appendChild(privacySection);
+
     for (const cat of schema) {
       const section = document.createElement('div');
       section.className = 'settings-category';

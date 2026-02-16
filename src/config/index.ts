@@ -58,7 +58,17 @@ export function loadConfig(): Config {
     ?? fileConfig.agent?.speedModel
     ?? 'gemma3:4b';
 
+  // Privacy config
+  const privacyModeRaw = process.env.MECENAS_PRIVACY_MODE ?? (fileConfig.privacy as any)?.mode ?? 'auto';
+  const privacyMode = (['auto', 'strict', 'off'].includes(privacyModeRaw) ? privacyModeRaw : 'auto') as 'auto' | 'strict' | 'off';
+
   const config: Config = {
+    privacy: {
+      mode: privacyMode,
+      blockCloudOnPii: (fileConfig.privacy as any)?.blockCloudOnPii ?? true,
+      anonymizeForCloud: (fileConfig.privacy as any)?.anonymizeForCloud ?? true,
+      stripActiveCaseForCloud: (fileConfig.privacy as any)?.stripActiveCaseForCloud ?? true,
+    },
     agent: {
       model: fileConfig.agent?.model ?? defaultModel,
       speedModel,

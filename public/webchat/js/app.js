@@ -420,6 +420,10 @@ class App {
         statusDot.title = 'Connected';
         reconnectBanner?.classList.remove('visible');
         srAnnounce('Połączono z serwerem.');
+        // Send stored privacy mode to server on connect
+        if (this._privacyMode && this._privacyMode !== 'auto') {
+          this.ws.ws.send(JSON.stringify({ type: 'privacy_mode', mode: this._privacyMode }));
+        }
         // Re-fetch messages after reconnect to recover any missed responses
         // Skip if switchSession already loaded history (flag cleared after use)
         if (this.activeSessionId && !this._skipNextRefresh) {
@@ -467,6 +471,42 @@ class App {
         } else {
           this.chat.addMessage(msg.message, 'system');
         }
+      }
+    });
+
+    // ── Privacy indicator ──
+    this._privacyMode = Storage.get('privacyMode') || 'auto';
+    const privacyBtn = document.getElementById('privacy-indicator');
+    if (privacyBtn) {
+      this._updatePrivacyIndicator();
+      privacyBtn.addEventListener('click', () => {
+        const modes = ['auto', 'strict', 'off'];
+        const idx = modes.indexOf(this._privacyMode);
+        this._privacyMode = modes[(idx + 1) % modes.length];
+        Storage.set('privacyMode', this._privacyMode);
+        this._updatePrivacyIndicator();
+        // Send to server
+        if (this.ws?.connected) {
+          this.ws.ws.send(JSON.stringify({ type: 'privacy_mode', mode: this._privacyMode }));
+        }
+      });
+    }
+
+    // Handle privacy_mode_set from server
+    this.ws.on('message', (msg) => {
+      if (msg.type === 'privacy_mode_set') {
+        this._privacyMode = msg.mode;
+        Storage.set('privacyMode', msg.mode);
+        this._updatePrivacyIndicator();
+      }
+    });
+
+    // Handle privacy mode change from settings panel
+    document.addEventListener('privacy-mode-change', (e) => {
+      this._privacyMode = e.detail.mode;
+      this._updatePrivacyIndicator();
+      if (this.ws?.connected) {
+        this.ws.ws.send(JSON.stringify({ type: 'privacy_mode', mode: this._privacyMode }));
       }
     });
 
@@ -808,6 +848,18 @@ class App {
       btn.innerHTML = this._sendSvg;
       btn.title = 'Send';
     }
+  }
+
+  _updatePrivacyIndicator() {
+    const btn = document.getElementById('privacy-indicator');
+    if (!btn) return;
+    const labels = {
+      auto: 'Ochrona prywatności: auto (dane wrażliwe → lokalny model)',
+      strict: 'Ochrona prywatności: ścisła (zawsze lokalny model)',
+      off: 'Ochrona prywatności: wyłączona',
+    };
+    btn.title = labels[this._privacyMode] || labels.auto;
+    btn.className = 'privacy-indicator privacy-' + this._privacyMode;
   }
 }
 
