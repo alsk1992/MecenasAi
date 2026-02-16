@@ -60,6 +60,14 @@ export async function createGateway(config: Config): Promise<AppGateway> {
     db.upsertSession(session);
   }
 
+  // Register GDPR session invalidation callback
+  db.onSessionsScrubbed((keys) => {
+    for (const key of keys) {
+      sessions.delete(key);
+    }
+    logger.info({ count: keys.length }, 'RODO: wyczyszczono cache sesji po usunięciu klienta');
+  });
+
   // Create agent (lazy import to avoid circular deps)
   const { createAgent, startDeadlineReminders } = await import('../agents/index.js');
   const agent = createAgent(config, db);
@@ -701,12 +709,9 @@ export async function createGateway(config: Config): Promise<AppGateway> {
         const doLock = () => {
           const locked = db.lockInactiveSessions(lockMs);
           for (const key of locked) {
-            const cached = sessions.get(key);
-            if (cached?.metadata?.activeCaseId) {
-              delete cached.metadata.activeCaseId;
-              cached.metadata._lockedAt = Date.now();
-              logPrivacyEvent({ action: 'session_lock', sessionKey: key, reason: 'inactivity_lock', privacyMode: config.privacy.mode });
-            }
+            // Remove from cache so next access re-reads from DB (avoids mid-request mutation)
+            sessions.delete(key);
+            logPrivacyEvent({ action: 'session_lock', sessionKey: key, reason: 'inactivity_lock', privacyMode: config.privacy.mode });
           }
         };
         doLock(); // run immediately on startup

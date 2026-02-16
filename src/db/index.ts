@@ -537,7 +537,10 @@ export interface Database {
   recordAiConsent(caseId: string, acknowledgedBy: string, scope?: string, notes?: string): { id: string };
   getAiConsent(caseId: string): { id: string; caseId: string; acknowledgedBy: string; scope: string; acknowledgedAt: Date; revokedAt?: Date } | null;
   revokeAiConsent(caseId: string): boolean;
-  gdprDeleteClient(clientId: string): { deletedCases: number; deletedDocuments: number; scrubbedSessions: number };
+  gdprDeleteClient(clientId: string): { deletedCases: number; deletedDocuments: number; scrubbedSessions: number; scrubbedSessionKeys: string[] };
+
+  // Callbacks
+  onSessionsScrubbed(cb: (keys: string[]) => void): void;
 
   // Raw
   raw(): SqlJsDatabase;
@@ -546,6 +549,7 @@ export interface Database {
 
 function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
   const now = () => Date.now();
+  const sessionScrubCallbacks: Array<(keys: string[]) => void> = [];
 
   return {
     // ===== USERS =====
@@ -1410,6 +1414,7 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
       const cases = this.listCases({ clientId });
       let deletedDocuments = 0;
       let deletedSessions = 0;
+      const scrubbedSessionKeys: string[] = [];
 
       // Delete all case-linked data (including embeddings derived from documents)
       for (const c of cases) {
@@ -1447,6 +1452,7 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
               if (client.email) cleaned = cleaned.split(client.email).join('[USUNIĘTO-EMAIL]');
               if (client.address) cleaned = cleaned.split(client.address).join('[USUNIĘTO-ADRES]');
               sqlDb.run('UPDATE sessions SET messages = ? WHERE key = ?', [cleaned, key]);
+              scrubbedSessionKeys.push(key);
               deletedSessions++;
             }
           }
@@ -1459,7 +1465,18 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
       scheduleSave();
       logger.info({ clientId, deletedCases: cases.length, deletedDocuments, scrubbedSessions: deletedSessions }, 'RODO: usunięto dane klienta');
 
-      return { deletedCases: cases.length, deletedDocuments, scrubbedSessions: deletedSessions };
+      // Notify listeners to invalidate in-memory caches
+      if (scrubbedSessionKeys.length > 0) {
+        for (const cb of sessionScrubCallbacks) {
+          try { cb(scrubbedSessionKeys); } catch { /* ignore callback errors */ }
+        }
+      }
+
+      return { deletedCases: cases.length, deletedDocuments, scrubbedSessions: deletedSessions, scrubbedSessionKeys };
+    },
+
+    onSessionsScrubbed(cb: (keys: string[]) => void) {
+      sessionScrubCallbacks.push(cb);
     },
 
     raw() { return sqlDb; },

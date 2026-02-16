@@ -69,7 +69,7 @@ const ALL_FIRST_NAMES = new Set([...POLISH_FIRST_NAMES_MALE, ...POLISH_FIRST_NAM
  */
 export function matchPolishName(text: string): string | null {
   // First pass: 3-word names (FirstName SecondName Surname)
-  const threeWordPattern = /(?<=\s|^)([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)\s+([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)\s+([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)(?=\s|$|[.,;:!?)}\]])/g;
+  const threeWordPattern = /(?<=\s|^|[("])([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)\s+([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)\s+([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)(?=\s|$|[.,;:!?)}\]"'-])/g;
   for (const m of text.matchAll(threeWordPattern)) {
     if (ALL_FIRST_NAMES.has(m[1]) && ALL_FIRST_NAMES.has(m[2]) && POLISH_SURNAMES.has(m[3])) {
       return `${m[1]} ${m[2]} ${m[3]}`;
@@ -80,7 +80,7 @@ export function matchPolishName(text: string): string | null {
   }
 
   // Second pass: 2-word names (FirstName Surname) — no greedy 3rd word capture
-  const twoWordPattern = /(?<=\s|^)([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)\s+([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)(?=\s|$|[.,;:!?)}\]])/g;
+  const twoWordPattern = /(?<=\s|^|[("])([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)\s+([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)(?=\s|$|[.,;:!?)}\]"'-])/g;
   for (const m of text.matchAll(twoWordPattern)) {
     if (ALL_FIRST_NAMES.has(m[1]) && POLISH_SURNAMES.has(m[2])) {
       return `${m[1]} ${m[2]}`;
@@ -99,7 +99,7 @@ export function findPolishNames(text: string): Array<{ name: string; index: numb
   const usedRanges: Array<[number, number]> = [];
 
   // First pass: 3-word names (FirstName SecondName Surname)
-  const threeWordPattern = /(?<=\s|^)([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)\s+([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)\s+([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)(?=\s|$|[.,;:!?)}\]])/g;
+  const threeWordPattern = /(?<=\s|^|[("])([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)\s+([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)\s+([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)(?=\s|$|[.,;:!?)}\]"'-])/g;
   for (const m of text.matchAll(threeWordPattern)) {
     if (
       (ALL_FIRST_NAMES.has(m[1]) && ALL_FIRST_NAMES.has(m[2]) && POLISH_SURNAMES.has(m[3])) ||
@@ -112,7 +112,7 @@ export function findPolishNames(text: string): Array<{ name: string; index: numb
   }
 
   // Second pass: 2-word names — skip ranges already covered by 3-word matches
-  const twoWordPattern = /(?<=\s|^)([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)\s+([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)(?=\s|$|[.,;:!?)}\]])/g;
+  const twoWordPattern = /(?<=\s|^|[("])([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)\s+([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)(?=\s|$|[.,;:!?)}\]"'-])/g;
   for (const m of text.matchAll(twoWordPattern)) {
     if (ALL_FIRST_NAMES.has(m[1]) && POLISH_SURNAMES.has(m[2])) {
       const idx = m.index!;

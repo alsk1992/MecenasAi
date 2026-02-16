@@ -1083,7 +1083,9 @@ async function executeTool(name: string, input: Record<string, unknown>, db: Dat
         return JSON.stringify({ documents: docs.map(d => ({ id: d.id, title: d.title, type: d.type, status: d.status, caseId: d.caseId })), count: docs.length });
       }
       case 'get_document': {
-        const doc = db.getDocument(input.id as string);
+        const gdId = requireString(input, 'id');
+        if (!gdId) return JSON.stringify({ error: 'ID dokumentu jest wymagane.' });
+        const doc = db.getDocument(gdId);
         if (!doc) return JSON.stringify({ error: 'Dokument nie znaleziony' });
         return JSON.stringify(doc);
       }
@@ -1131,18 +1133,21 @@ async function executeTool(name: string, input: Record<string, unknown>, db: Dat
       case 'add_case_note': {
         const noteCaseId = resolveCaseId(input, session);
         if (!noteCaseId) return JSON.stringify({ error: 'Brak ID sprawy. Podaj caseId lub ustaw aktywną sprawę (set_active_case).' });
+        const noteText = requireString(input, 'note');
+        if (!noteText) return JSON.stringify({ error: 'Treść notatki (note) jest wymagana.' });
         const existing = db.getCase(noteCaseId);
         if (!existing) return JSON.stringify({ error: 'Sprawa nie znaleziona' });
         const currentNotes = existing.notes ?? '';
         const timestamp = new Date().toLocaleString('pl-PL');
         const newNotes = currentNotes
-          ? `${currentNotes}\n\n[${timestamp}] ${input.note}`
-          : `[${timestamp}] ${input.note}`;
+          ? `${currentNotes}\n\n[${timestamp}] ${noteText}`
+          : `[${timestamp}] ${noteText}`;
         db.updateCase(noteCaseId, { notes: newNotes });
         return JSON.stringify({ success: true, message: 'Notatka dodana do sprawy' });
       }
       case 'set_active_case': {
-        const caseId = input.caseId as string;
+        const caseId = requireString(input, 'caseId');
+        if (!caseId) return JSON.stringify({ error: 'ID sprawy jest wymagane.' });
         const c = db.getCase(caseId);
         if (!c) return JSON.stringify({ error: 'Sprawa nie znaleziona' });
         if (!session.metadata) session.metadata = {};
@@ -1757,7 +1762,9 @@ async function executeTool(name: string, input: Record<string, unknown>, db: Dat
         });
       }
       case 'use_template': {
-        const template = db.getTemplate(input.templateId as string);
+        const utId = requireString(input, 'templateId');
+        if (!utId) return JSON.stringify({ error: 'ID szablonu jest wymagane.' });
+        const template = db.getTemplate(utId);
         if (!template) return JSON.stringify({ error: 'Szablon nie znaleziony' });
         db.incrementTemplateUseCount(template.id);
         return JSON.stringify({
@@ -2155,6 +2162,12 @@ export function createAgent(config: Config, db: Database): Agent {
             return '⚠️ **Ochrona prywatności**: Wykryto dane wrażliwe, a lokalny model AI (Ollama) jest niedostępny. Nie mogę przetworzyć tej wiadomości przez zewnętrzny serwer ze względu na tajemnicę adwokacką. Uruchom Ollama (`ollama serve`) i spróbuj ponownie.';
           }
           // decision === 'local' (PII detected, Ollama down)
+          // case_strict_mode = ALWAYS block cloud, regardless of blockCloudOnPii setting
+          if (privacy.reason === 'case_strict_mode') {
+            logPrivacyEvent({ action: 'route_refuse', sessionKey: session.key, userId: session.userId, caseId: activeCaseId, reason: 'case_strict_ollama_down', piiMatchCount: piiResult.matches.length, piiTypes: [...new Set(piiResult.matches.map(m => m.type))], privacyMode: (session.metadata?.privacyMode as string) ?? config.privacy.mode });
+            logger.warn({ reason: privacy.reason }, 'Sprawa w trybie ścisłym — Ollama niedostępna, blokuję przekazanie do chmury');
+            return '⚠️ **Ochrona prywatności**: Sprawa ma włączony tryb ścisły (strict). Lokalny model AI (Ollama) jest niedostępny. Ze względu na tajemnicę adwokacką nie mogę przekazać danych tej sprawy do zewnętrznego serwera. Uruchom Ollama (`ollama serve`) i spróbuj ponownie.';
+          }
           if (config.privacy.blockCloudOnPii) {
             logPrivacyEvent({ action: 'route_refuse', sessionKey: session.key, userId: session.userId, caseId: activeCaseId, reason: 'pii_ollama_down_blocked', piiMatchCount: piiResult.matches.length, piiTypes: [...new Set(piiResult.matches.map(m => m.type))], privacyMode: (session.metadata?.privacyMode as string) ?? config.privacy.mode });
             logger.warn({ reason: privacy.reason }, 'Wykryto dane wrażliwe — Ollama niedostępna, blokuję przekazanie do chmury');
@@ -2186,7 +2199,7 @@ export function createAgent(config: Config, db: Database): Agent {
             return await handleWithOllama(text, session, config, db, modelToUse);
           } catch (err) {
             // If Ollama fails and PII is present, refuse — do NOT fall back to cloud
-            if (privacy.reason === 'pii_detected' || privacy.reason === 'strict_mode') {
+            if (privacy.reason === 'pii_detected' || privacy.reason === 'strict_mode' || privacy.reason === 'case_strict_mode') {
               logger.error({ err }, 'Ollama error z danymi wrażliwymi — odmowa');
               return '⚠️ **Ochrona prywatności**: Lokalny model AI zwrócił błąd. Ze względu na dane wrażliwe w wiadomości nie mogę przełączyć na model zewnętrzny. Spróbuj ponownie.';
             }
@@ -2197,7 +2210,7 @@ export function createAgent(config: Config, db: Database): Agent {
 
       // --- Cloud path (no PII, or privacy=off, or blockCloudOnPii=false) ---
       // forceAnonymize when PII was detected but cloud is allowed (blockCloudOnPii=false fallthrough)
-      const piiDetectedForCloud = privacy.reason === 'pii_detected' || privacy.reason === 'strict_mode';
+      const piiDetectedForCloud = privacy.reason === 'pii_detected' || privacy.reason === 'strict_mode' || privacy.reason === 'case_strict_mode';
 
       // If using Anthropic as primary, skip Ollama
       if (config.agent.provider === 'anthropic' && config.agent.anthropicKey) {
