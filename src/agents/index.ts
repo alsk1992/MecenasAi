@@ -179,7 +179,7 @@ function buildSystemPrompt(session: Session, db: Database): string {
       parts.push(`Klient: ${client?.name ?? 'nieznany'}`);
       parts.push(`Status: ${activeCase.status}`);
       parts.push(`Dziedzina: ${activeCase.lawArea}`);
-      if (activeCase.description) parts.push(`Opis: ${activeCase.description}`);
+      if (activeCase.description) parts.push(`Opis: ${activeCase.description.slice(0, 2000)}`);
       if (deadlines.length > 0) {
         parts.push(`Nadchodzące terminy:`);
         for (const d of deadlines.slice(0, 5)) {
@@ -1995,6 +1995,19 @@ function isSimpleQuery(text: string): boolean {
   const lower = text.toLowerCase().trim();
   const len = lower.length;
 
+  // Check complex patterns FIRST (even short messages like "napisz pozew" need full model)
+  const complexPatterns = [
+    /napisz (pozew|apelacj|odpowiedź|pismo|umow|wezwanie|wniosek|opini)/,
+    /przygotuj (projekt|dokument|pismo)/,
+    /przeanalizuj|analiz[auy]/,
+    /sporządź|zredaguj/,
+    /wyjaśnij.{20,}/,   // long explanation requests
+    /porównaj|zestawienie/,
+  ];
+  for (const pat of complexPatterns) {
+    if (pat.test(lower)) return false;
+  }
+
   // Very short messages — greetings, confirmations, simple questions
   if (len < 60) return true;
 
@@ -2017,20 +2030,7 @@ function isSimpleQuery(text: string): boolean {
     if (pat.test(lower)) return true;
   }
 
-  // Complex queries — document drafting, analysis, long instructions
-  const complexPatterns = [
-    /napisz (pozew|apelacj|odpowiedź|pismo|umow|wezwanie|wniosek|opini)/,
-    /przygotuj (projekt|dokument|pismo)/,
-    /przeanalizuj|analiz[auy]/,
-    /sporządź|zredaguj/,
-    /wyjaśnij.{20,}/,   // long explanation requests
-    /porównaj|zestawienie/,
-  ];
-  for (const pat of complexPatterns) {
-    if (pat.test(lower)) return false;
-  }
-
-  // Medium-length messages default to speed model
+  // Medium-length messages default to speed model (complex already caught above)
   if (len < 200) return true;
 
   // Long messages go to the full model
@@ -2049,7 +2049,8 @@ async function checkOllamaModel(ollamaUrl: string, model: string): Promise<boole
     if (!resp.ok) return false;
     const data = await resp.json() as { models?: Array<{ name: string }> };
     const models = data.models ?? [];
-    return models.some(m => m.name === model || m.name.startsWith(model.split(':')[0]));
+    const baseName = model.split(':')[0];
+    return models.some(m => m.name === model || m.name === baseName || m.name.startsWith(baseName + ':'));
   } catch {
     return false;
   }
@@ -2143,6 +2144,8 @@ export interface Agent {
 
 export function createAgent(config: Config, db: Database): Agent {
   let speedModelAvailable: boolean | null = null; // null = not yet checked
+  let speedModelLastCheck = 0; // timestamp of last check
+  const SPEED_MODEL_RECHECK_MS = 300_000; // Re-check every 5 minutes
   const speedModel = config.agent.speedModel;
 
   return {
@@ -2182,9 +2185,10 @@ export function createAgent(config: Config, db: Database): Agent {
             logger.info({ reason: privacy.reason }, 'Wykryto dane wrażliwe — wymuszam routing lokalny');
           }
 
-          // Check speed model availability once
-          if (speedModelAvailable === null && speedModel) {
+          // Check speed model availability (re-check periodically)
+          if (speedModel && (speedModelAvailable === null || Date.now() - speedModelLastCheck > SPEED_MODEL_RECHECK_MS)) {
             speedModelAvailable = await checkOllamaModel(config.agent.ollamaUrl, speedModel);
+            speedModelLastCheck = Date.now();
             if (speedModelAvailable) {
               logger.info({ speedModel }, 'Speed model dostępny — routing aktywny');
             } else {
@@ -2218,9 +2222,10 @@ export function createAgent(config: Config, db: Database): Agent {
         return await handleWithAnthropic(text, session, config, db, piiDetectedForCloud);
       }
 
-      // Check speed model availability once
-      if (speedModelAvailable === null && speedModel) {
+      // Check speed model availability (re-check periodically)
+      if (speedModel && (speedModelAvailable === null || Date.now() - speedModelLastCheck > SPEED_MODEL_RECHECK_MS)) {
         speedModelAvailable = await checkOllamaModel(config.agent.ollamaUrl, speedModel);
+        speedModelLastCheck = Date.now();
         if (speedModelAvailable) {
           logger.info({ speedModel }, 'Speed model dostępny — routing aktywny');
         } else {
@@ -2488,8 +2493,8 @@ Jeśli nie musisz używać narzędzia, odpowiedz normalnym tekstem.`;
     try {
       result = await executeTool(toolCall.tool, toolCall.input, db, session);
     } catch (err) {
-      const msg = err instanceof Error ? err.message.slice(0, 100) : 'unknown';
-      result = JSON.stringify({ error: `Błąd narzędzia ${toolCall.tool}: ${msg}` });
+      logger.error({ err, tool: toolCall.tool }, 'Ollama tool execution error');
+      result = JSON.stringify({ error: `Wewnętrzny błąd narzędzia ${toolCall.tool}. Spróbuj ponownie lub użyj innego podejścia.` });
     }
     // Truncate large results to prevent Ollama context overflow
     if (result.length > 16000) {
@@ -2523,11 +2528,11 @@ function parseToolCall(text: string): { tool: string; input: Record<string, unkn
       }
     } catch {}
   }
-  // Use greedy match to capture the last } before closing backticks (handles nested JSON)
-  const codeBlockMatch = trimmed.match(/```(?:json)?\s*(\{[\s\S]*\})\s*```/);
-  if (codeBlockMatch) {
+  // Match each code block individually (non-greedy between ``` pairs)
+  const codeBlocks = [...trimmed.matchAll(/```(?:json)?\s*([\s\S]*?)\s*```/g)];
+  for (const block of codeBlocks) {
     try {
-      const parsed = JSON.parse(codeBlockMatch[1]);
+      const parsed = JSON.parse(block[1]);
       if (parsed.tool && typeof parsed.tool === 'string' && KNOWN_TOOL_NAMES.has(parsed.tool)) {
         return { tool: parsed.tool, input: parsed.input ?? {} };
       }

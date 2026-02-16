@@ -339,7 +339,7 @@ export async function createGateway(config: Config): Promise<AppGateway> {
             sessions.delete(key);
             // Create fresh session in DB
             const newSession: Session = {
-              key: `telegram:${chatId}:${Date.now()}`,
+              key: `telegram:${chatId}`,
               userId,
               channel: 'telegram',
               chatId,
@@ -640,7 +640,7 @@ export async function createGateway(config: Config): Promise<AppGateway> {
               });
             } catch (err: any) {
               logger.warn({ err }, 'Telegram document upload error');
-              await ctx.reply('Blad przetwarzania pliku: ' + (err?.message?.slice(0, 100) ?? 'nieznany'));
+              await ctx.reply('Wystąpił błąd podczas przetwarzania pliku. Sprawdź format i spróbuj ponownie.');
             }
           });
 

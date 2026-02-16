@@ -289,6 +289,18 @@ export function createServer(config: Config, db: Database): HttpServer {
             const caseId = url.searchParams.get('caseId') ?? undefined;
             const ext = filename.split('.').pop()?.toLowerCase() ?? '';
 
+            // Magic byte validation
+            if (ext === 'pdf' && !buffer.subarray(0, 5).toString('ascii').startsWith('%PDF')) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Plik nie wygląda na prawidłowy PDF.' }));
+              return;
+            }
+            if (ext === 'docx' && !(buffer.length >= 4 && buffer[0] === 0x50 && buffer[1] === 0x4B && buffer[2] === 0x03 && buffer[3] === 0x04)) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Plik nie wygląda na prawidłowy DOCX (brak sygnatury ZIP).' }));
+              return;
+            }
+
             let extractedText = '';
             try {
               if (ext === 'pdf') {
@@ -1083,6 +1095,17 @@ export function createServer(config: Config, db: Database): HttpServer {
 
         logger.info({ chatId, requireAuth }, 'WebChat client connected');
 
+        // Timeout unauthenticated connections after 30 seconds
+        let authTimeout: ReturnType<typeof setTimeout> | null = null;
+        if (requireAuth) {
+          authTimeout = setTimeout(() => {
+            if (!authenticated) {
+              logger.info({ chatId }, 'WebSocket auth timeout — closing unauthenticated connection');
+              try { ws.close(4003, 'Auth timeout'); } catch {}
+            }
+          }, 30_000);
+        }
+
         // If no auth required, immediately register and send authenticated
         if (authenticated) {
           clients.set(chatId, ws);
@@ -1112,6 +1135,7 @@ export function createServer(config: Config, db: Database): HttpServer {
               }
               if (!authenticated) {
                 authenticated = true;
+                if (authTimeout) { clearTimeout(authTimeout); authTimeout = null; }
                 clients.set(chatId, ws);
                 ws.send(JSON.stringify({
                   type: 'authenticated',
@@ -1193,7 +1217,7 @@ export function createServer(config: Config, db: Database): HttpServer {
               // Pass per-connection privacy mode in message metadata
               const privacyMode = (ws as any)._privacyMode as string | undefined;
               await callbacks.onWebChatMessage({
-                id: `wc_${Date.now()}`,
+                id: `wc_${Date.now()}_${++msgCount}`,
                 platform: 'webchat',
                 userId: chatId,
                 chatId,
@@ -1210,6 +1234,7 @@ export function createServer(config: Config, db: Database): HttpServer {
 
         ws.on('close', () => {
           clients.delete(chatId);
+          if (authTimeout) { clearTimeout(authTimeout); authTimeout = null; }
         });
 
         ws.on('error', (err) => {
@@ -1235,7 +1260,8 @@ export function createServer(config: Config, db: Database): HttpServer {
       });
 
       // Session TTL enforcement — clean up expired sessions every hour
-      const ttlMs = config.session?.ttlMs ?? 24 * 60 * 60 * 1000;
+      const rawTtlMs = config.session?.ttlMs ?? 24 * 60 * 60 * 1000;
+      const ttlMs = rawTtlMs > 0 ? rawTtlMs : 24 * 60 * 60 * 1000; // guard zero/negative
       sessionTtlTimer = setInterval(() => {
         try {
           const cutoff = Date.now() - ttlMs;
