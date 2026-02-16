@@ -993,7 +993,7 @@ async function executeTool(name: string, input: Record<string, unknown>, db: Dat
       case 'list_deadlines': {
         const deadlines = db.listDeadlines({
           caseId: resolveCaseId(input, session),
-          upcoming: input.upcoming as boolean | undefined,
+          upcoming: input.upcoming === true ? true : input.upcoming === false ? false : undefined,
         });
         return JSON.stringify({ deadlines, count: deadlines.length });
       }
@@ -1077,8 +1077,8 @@ async function executeTool(name: string, input: Record<string, unknown>, db: Dat
       case 'list_documents': {
         const docs = db.listDocuments({
           caseId: resolveCaseId(input, session),
-          status: input.status as string | undefined,
-          type: input.type as string | undefined,
+          status: optString(input, 'status'),
+          type: optString(input, 'type'),
         });
         return JSON.stringify({ documents: docs.map(d => ({ id: d.id, title: d.title, type: d.type, status: d.status, caseId: d.caseId })), count: docs.length });
       }
@@ -1220,7 +1220,7 @@ async function executeTool(name: string, input: Record<string, unknown>, db: Dat
         const billClient = db.getClient(billCase.clientId);
         const entries = db.listTimeEntries(billCaseId);
         if (entries.length === 0) return JSON.stringify({ message: 'Brak wpisów czasu pracy dla tej sprawy.' });
-        const defaultRate = (input.hourlyRate as number) ?? 300; // default 300 PLN/h
+        const defaultRate = optNumber(input, 'hourlyRate', 1, 10000) ?? 300; // default 300 PLN/h
         let totalMinutes = 0;
         let totalAmount = 0;
         const lineItems = entries.map(e => {
@@ -1748,9 +1748,9 @@ async function executeTool(name: string, input: Record<string, unknown>, db: Dat
       }
       case 'list_templates': {
         const templates = db.listTemplates({
-          type: input.type as string | undefined,
-          lawArea: input.lawArea as string | undefined,
-          query: input.query as string | undefined,
+          type: optString(input, 'type'),
+          lawArea: optString(input, 'lawArea'),
+          query: optString(input, 'query', 500),
         });
         return JSON.stringify({
           templates: templates.map(t => ({
@@ -2473,21 +2473,24 @@ Jeśli nie musisz używać narzędzia, odpowiedz normalnym tekstem.`;
   return response || null;
 }
 
+const KNOWN_TOOL_NAMES = new Set(TOOLS.map(t => t.name));
+
 function parseToolCall(text: string): { tool: string; input: Record<string, unknown> } | null {
   const trimmed = text.trim();
   if (trimmed.startsWith('{')) {
     try {
       const parsed = JSON.parse(trimmed);
-      if (parsed.tool && typeof parsed.tool === 'string') {
+      if (parsed.tool && typeof parsed.tool === 'string' && KNOWN_TOOL_NAMES.has(parsed.tool)) {
         return { tool: parsed.tool, input: parsed.input ?? {} };
       }
     } catch {}
   }
-  const codeBlockMatch = trimmed.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+  // Use greedy match to capture the last } before closing backticks (handles nested JSON)
+  const codeBlockMatch = trimmed.match(/```(?:json)?\s*(\{[\s\S]*\})\s*```/);
   if (codeBlockMatch) {
     try {
       const parsed = JSON.parse(codeBlockMatch[1]);
-      if (parsed.tool && typeof parsed.tool === 'string') {
+      if (parsed.tool && typeof parsed.tool === 'string' && KNOWN_TOOL_NAMES.has(parsed.tool)) {
         return { tool: parsed.tool, input: parsed.input ?? {} };
       }
     } catch {}
@@ -2514,17 +2517,17 @@ async function callOllama(
   };
 
   let response: Response;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 120_000); // 2 min timeout
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 120_000); // 2 min timeout
     response = await fetch(`${baseUrl}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
       signal: controller.signal,
     });
-    clearTimeout(timeout);
   } catch (err: any) {
+    clearTimeout(timeout);
     if (err?.name === 'AbortError') {
       throw new Error('Ollama nie odpowiedział w ciągu 2 minut. Model może być zbyt duży lub serwer jest przeciążony.');
     }

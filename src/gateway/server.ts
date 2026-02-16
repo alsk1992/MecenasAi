@@ -59,7 +59,10 @@ export function createServer(config: Config, db: Database): HttpServer {
     if (authMode === 'off') return true;
 
     const token = config.gateway.token;
-    if (!token) return true; // no token configured = open access
+    if (!token) {
+      logger.warn('Auth mode is "token" but no token configured — rejecting request. Set MECENAS_TOKEN.');
+      return false;
+    }
 
     const authHeader = req.headers.authorization ?? '';
     if (authHeader.startsWith('Bearer ')) {
@@ -77,7 +80,11 @@ export function createServer(config: Config, db: Database): HttpServer {
     const MAX = 1_048_576;
     req.on('data', (chunk) => {
       size += chunk.length;
-      if (size > MAX) { req.destroy(); return; }
+      if (size > MAX) {
+        if (!res.headersSent) { res.writeHead(413, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Treść zbyt duża (max 1 MB).' })); }
+        req.destroy();
+        return;
+      }
       body += chunk;
     });
     req.on('error', () => {
@@ -462,7 +469,7 @@ export function createServer(config: Config, db: Database): HttpServer {
             return;
           }
           generateDocx(doc, db).then((buffer) => {
-            const filename = `${doc.title.replace(/[^a-zA-Z0-9ąćęłńóśźżĄĆĘŁŃÓŚŹŻ\s_-]/g, '').trim().replace(/\s+/g, '_')}.docx`;
+            const filename = `${doc.title.replace(/[^a-zA-Z0-9ąćęłńóśźżĄĆĘŁŃÓŚŹŻ\s_-]/g, '').replace(/[\r\n\0]/g, '').trim().replace(/\s+/g, '_').slice(0, 200)}.docx`;
             res.writeHead(200, {
               'Content-Type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
               'Content-Disposition': `attachment; filename="${filename}"`,
@@ -1141,7 +1148,8 @@ export function createServer(config: Config, db: Database): HttpServer {
               return;
             }
 
-            if (msg.type === 'message' && msg.text) {
+            if (msg.type === 'message' && msg.text && typeof msg.text === 'string') {
+              const wsText = msg.text.length > 50000 ? msg.text.slice(0, 50000) : msg.text;
               // Pass per-connection privacy mode in message metadata
               const privacyMode = (ws as any)._privacyMode as string | undefined;
               await callbacks.onWebChatMessage({
@@ -1150,7 +1158,7 @@ export function createServer(config: Config, db: Database): HttpServer {
                 userId: chatId,
                 chatId,
                 chatType: 'dm',
-                text: msg.text,
+                text: wsText,
                 timestamp: new Date(),
                 metadata: privacyMode ? { privacyMode } : undefined,
               });

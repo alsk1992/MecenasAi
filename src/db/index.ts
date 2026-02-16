@@ -357,6 +357,10 @@ function runMigrations(sqlDb: import('sql.js').Database): void {
           const table = parts[0];
           const col = parts[1];
           const colDef = parts.slice(1).join(' ');
+          // Validate identifiers to prevent SQL injection in DDL
+          if (!/^[a-z_][a-z0-9_]*$/.test(table) || !/^[a-z_][a-z0-9_]*$/.test(col)) {
+            throw new Error(`Invalid migration identifier: ${table}.${col}`);
+          }
           const existing = sqlDb.exec(`SELECT COUNT(*) FROM pragma_table_info('${table}') WHERE name = '${col}'`);
           const exists = existing.length && existing[0].values[0][0] as number > 0;
           if (!exists) {
@@ -366,6 +370,7 @@ function runMigrations(sqlDb: import('sql.js').Database): void {
           sqlDb.run(stmt);
         }
       }
+      sqlDb.run('UPDATE _schema_version SET version = ?', [v]);
       sqlDb.run('COMMIT');
       logger.info({ migration: v }, 'Migration applied');
     } catch (err) {
@@ -375,7 +380,6 @@ function runMigrations(sqlDb: import('sql.js').Database): void {
     }
   }
 
-  sqlDb.run('UPDATE _schema_version SET version = ?', [CURRENT_SCHEMA_VERSION]);
   logger.info({ version: CURRENT_SCHEMA_VERSION }, 'Schema migrations complete');
 }
 
@@ -800,7 +804,7 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
       if (filters?.clientId) { sql += ' AND client_id = ?'; params.push(filters.clientId); }
       if (filters?.status) { sql += ' AND status = ?'; params.push(filters.status); }
       if (filters?.lawArea) { sql += ' AND law_area = ?'; params.push(filters.lawArea); }
-      sql += ' ORDER BY updated_at DESC';
+      sql += ' ORDER BY updated_at DESC LIMIT 500';
       const rows = sqlDb.exec(sql, bindParams(params));
       if (!rows.length) return [];
       return rows[0].values.map(v => ({
@@ -967,6 +971,7 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
     },
 
     deleteDocument(id: string) {
+      sqlDb.run("DELETE FROM embeddings WHERE source_type = 'document' AND source_id = ?", [id]);
       sqlDb.run('DELETE FROM documents WHERE id = ?', [id]);
       scheduleSave();
     },
@@ -1274,7 +1279,7 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
         sql += " AND (name LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\' OR tags LIKE ? ESCAPE '\\')";
         params.push(pattern, pattern, pattern);
       }
-      sql += ' ORDER BY use_count DESC, updated_at DESC';
+      sql += ' ORDER BY use_count DESC, updated_at DESC LIMIT 200';
       const rows = sqlDb.exec(sql, bindParams(params));
       if (!rows.length) return [];
       return rows[0].values.map(v => ({
@@ -1298,7 +1303,7 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
 
     // ===== EMBEDDINGS =====
     storeEmbedding(id, sourceType, sourceId, vector, contentHash) {
-      const buffer = Buffer.from(vector.buffer);
+      const buffer = Buffer.from(vector.buffer, vector.byteOffset, vector.byteLength);
       sqlDb.run(
         'INSERT OR REPLACE INTO embeddings (id, source_type, source_id, vector, content_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)',
         [id, sourceType, sourceId, buffer as any, contentHash ?? null, now()]
@@ -1437,21 +1442,31 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
       // Delete cases
       sqlDb.run('DELETE FROM cases WHERE client_id = ?', [clientId]);
       if (client) {
-        const allSessions = sqlDb.exec('SELECT key, messages FROM sessions');
+        const allSessions = sqlDb.exec('SELECT key, messages, metadata FROM sessions');
         if (allSessions.length) {
           for (const row of allSessions[0].values) {
             const key = row[0] as string;
             const messagesStr = row[1] as string;
-            if (messagesStr.includes(client.name) || (client.pesel && messagesStr.includes(client.pesel)) || (client.address && messagesStr.includes(client.address))) {
+            const metadataStr = (row[2] as string) ?? '';
+            const hasPii = messagesStr.includes(client.name) || metadataStr.includes(client.name)
+              || (client.pesel && (messagesStr.includes(client.pesel) || metadataStr.includes(client.pesel)))
+              || (client.address && (messagesStr.includes(client.address) || metadataStr.includes(client.address)));
+            if (hasPii) {
               // Replace client PII in messages with [USUNIĘTO]
-              let cleaned = messagesStr;
-              cleaned = cleaned.split(client.name).join('[USUNIĘTO-KLIENT]');
-              if (client.pesel) cleaned = cleaned.split(client.pesel).join('[USUNIĘTO-PESEL]');
-              if (client.nip) cleaned = cleaned.split(client.nip).join('[USUNIĘTO-NIP]');
-              if (client.phone) cleaned = cleaned.split(client.phone).join('[USUNIĘTO-TEL]');
-              if (client.email) cleaned = cleaned.split(client.email).join('[USUNIĘTO-EMAIL]');
-              if (client.address) cleaned = cleaned.split(client.address).join('[USUNIĘTO-ADRES]');
-              sqlDb.run('UPDATE sessions SET messages = ? WHERE key = ?', [cleaned, key]);
+              let cleanedMsg = messagesStr;
+              let cleanedMeta = metadataStr;
+              const scrub = (text: string) => {
+                let t = text.split(client!.name).join('[USUNIĘTO-KLIENT]');
+                if (client!.pesel) t = t.split(client!.pesel).join('[USUNIĘTO-PESEL]');
+                if (client!.nip) t = t.split(client!.nip).join('[USUNIĘTO-NIP]');
+                if (client!.phone) t = t.split(client!.phone).join('[USUNIĘTO-TEL]');
+                if (client!.email) t = t.split(client!.email).join('[USUNIĘTO-EMAIL]');
+                if (client!.address) t = t.split(client!.address).join('[USUNIĘTO-ADRES]');
+                return t;
+              };
+              cleanedMsg = scrub(cleanedMsg);
+              cleanedMeta = metadataStr ? scrub(cleanedMeta) : metadataStr;
+              sqlDb.run('UPDATE sessions SET messages = ?, metadata = ? WHERE key = ?', [cleanedMsg, cleanedMeta || null, key]);
               scrubbedSessionKeys.push(key);
               deletedSessions++;
             }
@@ -1498,7 +1513,9 @@ function cosineSimilarity(a: Float32Array, b: Float32Array): number {
     normB += b[i] * b[i];
   }
   const denom = Math.sqrt(normA) * Math.sqrt(normB);
-  return Math.abs(denom) < 1e-10 ? 0 : dot / denom;
+  if (Math.abs(denom) < 1e-10) return 0;
+  const result = dot / denom;
+  return Number.isFinite(result) ? result : 0;
 }
 
 export { createDatabaseInterface };

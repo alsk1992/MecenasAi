@@ -581,8 +581,19 @@ export async function createGateway(config: Config): Promise<AppGateway> {
               }
               await ctx.reply('Przetwarzam plik...');
               const file = await ctx.getFile();
+              if (!file.file_path || !/^[a-zA-Z0-9\/_.-]+$/.test(file.file_path)) {
+                await ctx.reply('Nieprawidlowa sciezka pliku.');
+                return;
+              }
               const fileUrl = `https://api.telegram.org/file/bot${config.channels.telegram!.token}/${file.file_path}`;
-              const resp = await fetch(fileUrl);
+              const dlAbort = new AbortController();
+              const dlTimeout = setTimeout(() => dlAbort.abort(), 30_000);
+              let resp: Response;
+              try {
+                resp = await fetch(fileUrl, { signal: dlAbort.signal });
+              } finally {
+                clearTimeout(dlTimeout);
+              }
               if (!resp.ok) { await ctx.reply('Nie udalo sie pobrac pliku.'); return; }
               const buffer = Buffer.from(await resp.arrayBuffer());
 
