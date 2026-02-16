@@ -1017,8 +1017,12 @@ export function createServer(config: Config, db: Database): HttpServer {
               blockCloudOnPii: config.privacy.blockCloudOnPii,
               anonymizeForCloud: config.privacy.anonymizeForCloud,
               stripActiveCaseForCloud: config.privacy.stripActiveCaseForCloud,
+              dpaAccepted: config.privacy.dpaAccepted,
+              dpaAcceptedAt: config.privacy.dpaAcceptedAt ?? null,
+              offModeWaiver: config.privacy.offModeWaiver,
               ollamaAvailable: ollamaUp,
               anthropicConfigured: !!config.agent.anthropicKey,
+              crossBorderNotice: config.privacy.dpaAccepted ? 'Dane mogą być przekazywane do Anthropic (USA) na podstawie SKU/DPA.' : null,
             }));
           }).catch((err) => {
             logger.warn({ err }, 'Privacy status handler error');
@@ -1220,6 +1224,11 @@ export function createServer(config: Config, db: Database): HttpServer {
               let mode = String(msg.mode ?? '').trim();
               if (!['auto', 'strict', 'off'].includes(mode)) {
                 ws.send(JSON.stringify({ type: 'error', message: 'Tryb prywatności musi być: auto, strict lub off.' }));
+                return;
+              }
+              // Block 'off' mode without explicit waiver
+              if (mode === 'off' && !config.privacy.offModeWaiver) {
+                ws.send(JSON.stringify({ type: 'error', message: 'Tryb "off" wymaga jawnego potwierdzenia w konfiguracji (MECENAS_OFF_MODE_WAIVER=true). Ze względu na tajemnicę adwokacką wyłączenie ochrony prywatności wymaga świadomej decyzji.' }));
                 return;
               }
               // Server-side enforcement: session mode cannot be less restrictive than global config

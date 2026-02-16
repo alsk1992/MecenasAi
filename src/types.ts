@@ -286,6 +286,12 @@ export interface PrivacyConfig {
   sessionLockMinutes: number;
   /** Enable security headers HSTS etc. (default: false) */
   hstsEnabled: boolean;
+  /** Whether the user has accepted the DPA with cloud provider (required for cloud calls) */
+  dpaAccepted: boolean;
+  /** Timestamp when DPA was accepted (ISO string) */
+  dpaAcceptedAt?: string;
+  /** Whether privacy-off mode has been explicitly acknowledged (waiver required) */
+  offModeWaiver: boolean;
 }
 
 export interface Config {

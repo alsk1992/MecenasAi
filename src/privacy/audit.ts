@@ -22,7 +22,13 @@ export type PrivacyAction =
   | 'consent_record'    // AI consent recorded for case
   | 'consent_check'     // AI consent checked for case
   | 'consent_revoke'    // AI consent revoked for case
-  | 'mode_change';      // Privacy mode changed
+  | 'mode_change'       // Privacy mode changed
+  | 'dpa_accept'        // DPA with cloud provider accepted
+  | 'dpa_block'         // Cloud call blocked due to missing DPA
+  | 'cross_border'      // Cross-border data transfer to cloud
+  | 'off_mode_waiver'   // Explicit waiver for privacy-off mode
+  | 'off_mode_block'    // Off mode blocked (no waiver)
+  | 'client_informed';  // Client informed about AI processing
 
 export interface AuditEntry {
   action: PrivacyAction;

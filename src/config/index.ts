@@ -58,9 +58,16 @@ export function loadConfig(): Config {
     ?? fileConfig.agent?.speedModel
     ?? 'gemma3:4b';
 
-  // Privacy config
-  const privacyModeRaw = (process.env.MECENAS_PRIVACY_MODE?.trim()) ?? (fileConfig.privacy as any)?.mode ?? 'auto';
-  const privacyMode = (['auto', 'strict', 'off'].includes(privacyModeRaw) ? privacyModeRaw : 'auto') as 'auto' | 'strict' | 'off';
+  // Privacy config — default to 'strict' (safest for tajemnica adwokacka)
+  const privacyModeRaw = (process.env.MECENAS_PRIVACY_MODE?.trim()) ?? (fileConfig.privacy as any)?.mode ?? 'strict';
+  const privacyMode = (['auto', 'strict', 'off'].includes(privacyModeRaw) ? privacyModeRaw : 'strict') as 'auto' | 'strict' | 'off';
+
+  // DPA acceptance state (required before ANY cloud API calls)
+  const dpaAccepted = process.env.MECENAS_DPA_ACCEPTED === 'true' || ((fileConfig.privacy as any)?.dpaAccepted ?? false);
+  const dpaAcceptedAt = (fileConfig.privacy as any)?.dpaAcceptedAt as string | undefined;
+
+  // Off-mode requires explicit waiver acknowledgment (disabling all privacy is dangerous)
+  const offModeWaiver = process.env.MECENAS_OFF_MODE_WAIVER === 'true' || ((fileConfig.privacy as any)?.offModeWaiver ?? false);
 
   const config: Config = {
     privacy: {
@@ -71,6 +78,9 @@ export function loadConfig(): Config {
       sessionPurgeHours: Math.max(0, safeParseInt(process.env.MECENAS_SESSION_PURGE_HOURS, (fileConfig.privacy as any)?.sessionPurgeHours ?? 72)),
       sessionLockMinutes: Math.max(0, safeParseInt(process.env.MECENAS_SESSION_LOCK_MINUTES, (fileConfig.privacy as any)?.sessionLockMinutes ?? 30)),
       hstsEnabled: process.env.MECENAS_HSTS === 'true' || ((fileConfig.privacy as any)?.hstsEnabled ?? false),
+      dpaAccepted,
+      dpaAcceptedAt,
+      offModeWaiver,
     },
     agent: {
       model: fileConfig.agent?.model ?? defaultModel,

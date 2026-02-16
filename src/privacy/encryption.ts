@@ -20,15 +20,37 @@ const KEY_FILE = join(resolveStateDir(), 'db.key');
 // Magic bytes to identify encrypted files
 const MAGIC = Buffer.from('MECENAS1');
 
+const SALT_FILE = join(resolveStateDir(), 'db.salt');
+
 /**
  * Derive a 256-bit key from a passphrase using scrypt.
- * Salt is fixed per-installation (derived from key itself) for deterministic derivation.
+ * Uses per-installation random salt (generated on first run, persisted to db.salt).
  */
 function deriveKey(passphrase: string): Buffer {
-  // Use first 16 bytes of scrypt with static salt for key derivation
-  // (the actual randomness comes from the passphrase / generated key)
-  const salt = Buffer.from('mecenas-db-salt-v1');
+  const salt = getOrCreateSalt();
   return scryptSync(passphrase, salt, 32);
+}
+
+/** Get or create a per-installation random salt (16 bytes) */
+function getOrCreateSalt(): Buffer {
+  // Try to read existing salt file
+  if (existsSync(SALT_FILE)) {
+    try {
+      return readFileSync(SALT_FILE);
+    } catch {
+      // Fall through to create new salt
+    }
+  }
+  // Generate new random salt and persist
+  const salt = randomBytes(16);
+  try {
+    writeFileSync(SALT_FILE, salt, { mode: 0o600 });
+    chmodSync(SALT_FILE, 0o600);
+  } catch {
+    // If we can't persist, use static fallback (better than crashing)
+    return Buffer.from('mecenas-db-salt-v1');
+  }
+  return salt;
 }
 
 /**

@@ -36,6 +36,13 @@ Zasady:
 - Dodajesz zastrzeżenie "PROJEKT — wymaga weryfikacji prawnika" do każdego dokumentu
 - Używasz właściwej terminologii prawniczej
 
+Ochrona prywatności i tajemnica adwokacka:
+- Przestrzegasz tajemnicy adwokackiej (Art. 6 Prawo o adwokaturze) i tajemnicy radcowskiej (Art. 3 Ustawa o radcach prawnych)
+- Dane osobowe klientów przetwarzasz zgodnie z RODO
+- Przy pierwszym wprowadzeniu danych klienta, ZAWSZE przypominaj o obowiązku poinformowania klienta o przetwarzaniu AI (Art. 13 RODO) — użyj narzędzia record_client_informed
+- Dla spraw karnych i rodzinnych zalecaj tryb prywatności "strict" (tylko lokalne przetwarzanie)
+- Nigdy nie ujawniaj danych jednego klienta w kontekście innej sprawy
+
 Szablony pism (stosuj przy draft_document):
 
 POZEW:
@@ -154,6 +161,9 @@ Dostępne narzędzia:
 - record_ai_consent, check_ai_consent, revoke_ai_consent — zarządzanie zgodą na AI (RODO)
 - gdpr_delete_client — RODO Art. 17 — trwałe usunięcie danych klienta
 - set_case_privacy — ustaw tryb prywatności dla konkretnej sprawy (np. strict dla karnych)
+- record_client_informed — zarejestruj poinformowanie klienta o AI (obowiązek RODO Art. 13)
+- generate_privacy_notice — wygeneruj klauzulę informacyjną RODO dla klienta
+- generate_dpia_report — wygeneruj raport DPIA/OSOD (Art. 35 RODO)
 
 Bądź konkretny, profesjonalny i pomocny. Jeśli czegoś nie wiesz, powiedz to wprost.`;
 
@@ -823,9 +833,50 @@ const TOOLS: ToolDef[] = [
       type: 'object',
       properties: {
         caseId: { type: 'string', description: 'ID sprawy' },
-        privacyMode: { type: 'string', enum: ['auto', 'strict', 'off'], description: 'Tryb prywatności (strict = tylko lokalny model)' },
+        privacyMode: { type: 'string', enum: ['auto', 'strict'], description: 'Tryb prywatności (strict = tylko lokalny model)' },
       },
       required: ['caseId', 'privacyMode'],
+    },
+  },
+  {
+    name: 'record_client_informed',
+    description: 'Zarejestruj, że klient został poinformowany o przetwarzaniu danych przez AI (obowiązek informacyjny RODO Art. 13-14). Powinno być wykonane PRZED rozpoczęciem pracy z danymi klienta.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        clientId: { type: 'string', description: 'ID klienta' },
+        method: { type: 'string', enum: ['ustnie', 'pisemnie', 'email', 'formularz'], description: 'Sposób poinformowania' },
+        notes: { type: 'string', description: 'Dodatkowe uwagi (np. "klient zaakceptował klauzulę informacyjną")' },
+      },
+      required: ['clientId', 'method'],
+    },
+  },
+  {
+    name: 'generate_privacy_notice',
+    description: 'Wygeneruj klauzulę informacyjną RODO dla klienta (Art. 13). Dokument informuje klienta o przetwarzaniu danych osobowych, w tym przez systemy AI.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        clientId: { type: 'string', description: 'ID klienta (opcjonalnie — do personalizacji)' },
+        lawyerName: { type: 'string', description: 'Imię i nazwisko adwokata/radcy prawnego' },
+        firmName: { type: 'string', description: 'Nazwa kancelarii' },
+        firmAddress: { type: 'string', description: 'Adres kancelarii' },
+        includeCloudProcessing: { type: 'boolean', description: 'Czy uwzględnić informację o przetwarzaniu w chmurze (Anthropic)' },
+      },
+      required: ['lawyerName', 'firmName'],
+    },
+  },
+  {
+    name: 'generate_dpia_report',
+    description: 'Wygeneruj raport z Oceny Skutków dla Ochrony Danych (DPIA/OSOD) wymaganej przez RODO Art. 35 dla przetwarzania danych klientów przez AI. Raport zawiera opis przetwarzania, ocenę ryzyk i środki zabezpieczające.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        lawyerName: { type: 'string', description: 'Imię i nazwisko administratora danych' },
+        firmName: { type: 'string', description: 'Nazwa kancelarii' },
+        processingPurpose: { type: 'string', description: 'Cel przetwarzania (np. "analiza prawna spraw cywilnych")' },
+      },
+      required: ['lawyerName', 'firmName'],
     },
   },
 ];
@@ -873,7 +924,7 @@ const VALID_CASE_STATUSES = ['nowa', 'w_toku', 'oczekuje_na_termin', 'oczekuje_n
 // TOOL EXECUTION
 // =============================================================================
 
-async function executeTool(name: string, input: Record<string, unknown>, db: Database, session: Session): Promise<string> {
+async function executeTool(name: string, input: Record<string, unknown>, db: Database, session: Session, config?: Config): Promise<string> {
   try {
     switch (name) {
       case 'create_client': {
@@ -1982,11 +2033,188 @@ async function executeTool(name: string, input: Record<string, unknown>, db: Dat
         const scpCaseId = requireString(input, 'caseId');
         if (!scpCaseId) return JSON.stringify({ error: 'ID sprawy jest wymagane.' });
         const mode = requireString(input, 'privacyMode');
-        if (!mode || !['auto', 'strict', 'off'].includes(mode)) return JSON.stringify({ error: 'Tryb musi być: auto, strict lub off.' });
-        const updated = db.updateCase(scpCaseId, { privacyMode: mode as 'auto' | 'strict' | 'off' });
+        // Per-case privacy: only auto or strict (off not allowed at case level for safety)
+        if (!mode || !['auto', 'strict'].includes(mode)) return JSON.stringify({ error: 'Tryb musi być: auto lub strict. Tryb "off" nie jest dozwolony na poziomie sprawy ze względu na tajemnicę adwokacką.' });
+        const updated = db.updateCase(scpCaseId, { privacyMode: mode as 'auto' | 'strict' });
         if (!updated) return JSON.stringify({ error: 'Sprawa nie znaleziona.' });
         logPrivacyEvent({ action: 'mode_change', sessionKey: session.key, userId: session.userId, caseId: scpCaseId, reason: `case_privacy_set_${mode}`, privacyMode: mode });
         return JSON.stringify({ success: true, message: `Tryb prywatności sprawy ustawiony na: ${mode}.` });
+      }
+      case 'record_client_informed': {
+        const rciClientId = requireString(input, 'clientId');
+        if (!rciClientId) return JSON.stringify({ error: 'ID klienta jest wymagane.' });
+        const client = db.getClient(rciClientId);
+        if (!client) return JSON.stringify({ error: 'Klient nie znaleziony.' });
+        const method = requireString(input, 'method');
+        if (!method || !['ustnie', 'pisemnie', 'email', 'formularz'].includes(method)) {
+          return JSON.stringify({ error: 'Sposób poinformowania musi być: ustnie, pisemnie, email lub formularz.' });
+        }
+        const rciNotes = optString(input, 'notes');
+        // Log the client information event in privacy audit trail
+        logPrivacyEvent({
+          action: 'client_informed',
+          sessionKey: session.key,
+          userId: session.userId,
+          reason: `client_informed:${rciClientId}:${method}${rciNotes ? ':' + rciNotes.slice(0, 100) : ''}`,
+          privacyMode: (session.metadata?.privacyMode as string) ?? config?.privacy?.mode ?? 'strict',
+        });
+        return JSON.stringify({
+          success: true,
+          message: `Zarejestrowano poinformowanie klienta o przetwarzaniu AI (metoda: ${method}). Wpis zapisany w dzienniku prywatności zgodnie z Art. 13 RODO.`,
+          clientId: rciClientId,
+          method,
+          timestamp: new Date().toISOString(),
+        });
+      }
+      case 'generate_privacy_notice': {
+        const lawyerName = requireString(input, 'lawyerName') ?? '[Imię i Nazwisko]';
+        const firmName = requireString(input, 'firmName') ?? '[Nazwa Kancelarii]';
+        const firmAddress = optString(input, 'firmAddress') ?? '[Adres Kancelarii]';
+        const includeCloud = input.includeCloudProcessing === true;
+
+        const notice = `KLAUZULA INFORMACYJNA
+(Art. 13 Rozporządzenia Parlamentu Europejskiego i Rady (UE) 2016/679 — RODO)
+
+1. ADMINISTRATOR DANYCH OSOBOWYCH
+Administratorem Pani/Pana danych osobowych jest ${lawyerName}, prowadzący/a działalność w ramach ${firmName}, z siedzibą: ${firmAddress}.
+
+2. CEL I PODSTAWA PRZETWARZANIA
+Pani/Pana dane osobowe przetwarzane są w celu:
+a) świadczenia pomocy prawnej — na podstawie Art. 6 ust. 1 lit. b) RODO (wykonanie umowy) oraz Art. 6 ust. 1 lit. f) RODO (prawnie uzasadniony interes administratora);
+b) wypełnienia obowiązków prawnych ciążących na administratorze — Art. 6 ust. 1 lit. c) RODO.
+
+3. WYKORZYSTANIE SYSTEMÓW AI
+W ramach świadczenia pomocy prawnej administrator korzysta z systemu sztucznej inteligencji „Mecenas" do wspomagania analizy prawnej, redagowania pism i zarządzania sprawami. System ten:
+- przetwarza dane na urządzeniu lokalnym administratora (model AI Bielik);
+- stosuje szyfrowanie danych w spoczynku (AES-256-GCM);
+- automatycznie wykrywa i chroni dane osobowe (PESEL, NIP, adresy, numery spraw);
+- podlega pełnej kontroli administratora;
+- NIE podejmuje autonomicznych decyzji prawnych — wszystkie dokumenty weryfikuje prawnik.${includeCloud ? `
+
+UWAGA — PRZETWARZANIE W CHMURZE:
+W określonych przypadkach (brak dostępu do lokalnego modelu AI) dane mogą być przekazywane do Anthropic, PBC (USA) w celu przetwarzania przez model Claude. Transfer odbywa się na podstawie Standardowych Klauzul Umownych (SKU) zgodnie z Art. 46 ust. 2 lit. c) RODO. Przed przekazaniem dane są automatycznie anonimizowane (zastępowanie danych osobowych znacznikami). Administrator zawarł z Anthropic umowę powierzenia przetwarzania danych (DPA) zgodnie z Art. 28 RODO.` : ''}
+
+4. ODBIORCY DANYCH
+Dane mogą być udostępniane:
+a) organom wymiaru sprawiedliwości (sądy, prokuratura) — w zakresie prowadzonej sprawy;
+b) podmiotom uprawnionym na podstawie przepisów prawa;
+c) podmiotom przetwarzającym dane na zlecenie administratora (obsługa IT).
+
+5. OKRES PRZECHOWYWANIA
+Dane przechowywane są przez okres świadczenia pomocy prawnej oraz 10 lat od zakończenia sprawy (zgodnie z wymogami korporacyjnymi i terminami przedawnienia).
+
+6. PRAWA OSOBY, KTÓREJ DANE DOTYCZĄ
+Przysługuje Pani/Panu prawo do:
+a) dostępu do swoich danych (Art. 15 RODO);
+b) sprostowania danych (Art. 16 RODO);
+c) usunięcia danych — „prawo do bycia zapomnianym" (Art. 17 RODO);
+d) ograniczenia przetwarzania (Art. 18 RODO);
+e) przenoszenia danych (Art. 20 RODO);
+f) sprzeciwu wobec przetwarzania (Art. 21 RODO);
+g) wniesienia skargi do Prezesa UODO (ul. Stawki 2, 00-193 Warszawa).
+
+7. OBOWIĄZEK PODANIA DANYCH
+Podanie danych osobowych jest dobrowolne, lecz niezbędne do świadczenia pomocy prawnej.
+
+Data: ${new Date().toLocaleDateString('pl-PL')}
+${firmName}
+${lawyerName}
+
+---
+PROJEKT — wymaga weryfikacji prawnika`;
+
+        return JSON.stringify({ success: true, notice, message: 'Klauzula informacyjna RODO wygenerowana. Wymaga weryfikacji i dostosowania do konkretnej kancelarii.' });
+      }
+      case 'generate_dpia_report': {
+        const dpiaLawyer = requireString(input, 'lawyerName') ?? '[Administrator]';
+        const dpiaFirm = requireString(input, 'firmName') ?? '[Kancelaria]';
+        const dpiaPurpose = optString(input, 'processingPurpose') ?? 'analiza prawna i redagowanie pism procesowych';
+
+        const dpia = `OCENA SKUTKÓW DLA OCHRONY DANYCH (DPIA/OSOD)
+(Art. 35 Rozporządzenia Parlamentu Europejskiego i Rady (UE) 2016/679 — RODO)
+
+Data sporządzenia: ${new Date().toLocaleDateString('pl-PL')}
+Administrator: ${dpiaLawyer}, ${dpiaFirm}
+
+═══════════════════════════════════════════════════
+1. OPIS PRZETWARZANIA
+═══════════════════════════════════════════════════
+
+1.1. Cel przetwarzania: ${dpiaPurpose}
+1.2. System: Mecenas — asystent prawny AI
+1.3. Kategorie danych:
+  - Dane identyfikacyjne: imię, nazwisko, PESEL, NIP, REGON, KRS
+  - Dane kontaktowe: adres, telefon, email
+  - Dane dotyczące spraw: sygnatury, strony, wartość przedmiotu sporu
+  - Dane szczególnych kategorii: dane dotyczące wyroków skazujących (Art. 10 RODO)
+
+1.4. Kategorie osób: klienci kancelarii, strony przeciwne, świadkowie
+1.5. Podstawa prawna: Art. 6 ust. 1 lit. b) i f) RODO
+
+═══════════════════════════════════════════════════
+2. OCENA KONIECZNOŚCI I PROPORCJONALNOŚCI
+═══════════════════════════════════════════════════
+
+2.1. Konieczność: Przetwarzanie jest niezbędne do efektywnego świadczenia pomocy prawnej.
+2.2. Proporcjonalność: System przetwarza wyłącznie dane niezbędne w kontekście danej sprawy.
+2.3. Minimalizacja: Domyślne przetwarzanie lokalne (model Bielik), chmura tylko jako fallback z anonimizacją.
+
+═══════════════════════════════════════════════════
+3. OCENA RYZYK
+═══════════════════════════════════════════════════
+
+| Ryzyko | Prawdopodobieństwo | Wpływ | Poziom |
+|--------|-------------------|-------|--------|
+| Wyciek danych do dostawcy AI | Niskie | Wysoki | ŚREDNI |
+| Naruszenie tajemnicy adwokackiej | Bardzo niskie | Krytyczny | ŚREDNI |
+| Nieuprawniony dostęp do bazy | Niskie | Wysoki | ŚREDNI |
+| Utrata danych | Niskie | Średni | NISKI |
+| Błędna analiza prawna AI | Średnie | Średni | ŚREDNI |
+| Reidentyfikacja po anonimizacji | Niskie | Wysoki | ŚREDNI |
+
+═══════════════════════════════════════════════════
+4. ŚRODKI ZABEZPIECZAJĄCE
+═══════════════════════════════════════════════════
+
+4.1. OCHRONA TECHNICZNA:
+  ✅ Szyfrowanie bazy danych AES-256-GCM (w spoczynku)
+  ✅ Automatyczne wykrywanie PII (PESEL, NIP, IBAN, nazwiska, adresy)
+  ✅ Trójpoziomowy system prywatności (strict/auto/off)
+  ✅ Anonimizacja dwukierunkowa przed wysłaniem do chmury
+  ✅ Blokada wysyłania do chmury przy wykryciu PII (domyślnie)
+  ✅ Automatyczne czyszczenie sesji (72h)
+  ✅ Blokada aktywnej sprawy po 30 min nieaktywności
+  ✅ Dziennik audytu prywatności (bez wartości PII)
+  ✅ Redakcja PII w logach systemowych
+
+4.2. OCHRONA ORGANIZACYJNA:
+  ✅ Domyślny tryb "strict" (tylko lokalne przetwarzanie)
+  ✅ Obowiązek informacyjny (narzędzie record_client_informed)
+  ✅ Zarządzanie zgodą na AI per sprawa
+  ✅ Prawo do usunięcia (RODO Art. 17) — narzędzie gdpr_delete_client
+  ✅ Weryfikacja DPA przed wywołaniami chmury
+  ✅ Dokumentacja transferu transgranicznego
+
+4.3. ŚRODKI DODATKOWE (ZALECANE):
+  ⬜ Szkolenie personelu z ochrony danych
+  ⬜ Regularne audyty bezpieczeństwa
+  ⬜ Procedura zgłaszania naruszeń (72h do UODO — Art. 33 RODO)
+  ⬜ Polityka retencji danych (10 lat od zamknięcia sprawy)
+
+═══════════════════════════════════════════════════
+5. DECYZJA
+═══════════════════════════════════════════════════
+
+Na podstawie przeprowadzonej oceny stwierdza się, że wdrożone środki zabezpieczające w wystarczającym stopniu minimalizują zidentyfikowane ryzyka. Przetwarzanie może być prowadzone z zachowaniem powyższych środków.
+
+Podpis administratora: ______________________
+${dpiaLawyer}
+${dpiaFirm}
+
+---
+PROJEKT — wymaga weryfikacji prawnika i dostosowania do konkretnej kancelarii`;
+
+        return JSON.stringify({ success: true, report: dpia, message: 'Raport DPIA/OSOD wygenerowany (Art. 35 RODO). Wymaga weryfikacji, dostosowania i podpisania.' });
       }
       default:
         return JSON.stringify({ error: `Nieznane narzędzie: ${name}` });
@@ -2085,9 +2313,15 @@ function classifyPrivacy(
 ): { decision: PrivacyDecision; reason: string } {
   const mode = (session.metadata?.privacyMode as string) ?? config.privacy.mode;
 
-  // Off = no protection
+  // Off mode requires explicit waiver — without it, treat as 'auto'
   if (mode === 'off') {
-    return { decision: 'cloud_anonymized', reason: 'privacy_off' };
+    if (!config.privacy.offModeWaiver) {
+      logPrivacyEvent({ action: 'off_mode_block', sessionKey: session.key, userId: session.userId, reason: 'off_mode_no_waiver', privacyMode: 'off' });
+      logger.warn('Tryb prywatności "off" wymaga jawnego potwierdzenia (MECENAS_OFF_MODE_WAIVER=true). Używam trybu "auto".');
+      // Fall through to auto mode behavior below
+    } else {
+      return { decision: 'cloud_anonymized', reason: 'privacy_off' };
+    }
   }
 
   // Check current message for PII
@@ -2312,6 +2546,16 @@ async function handleWithAnthropic(
     return '⚠️ **Ochrona prywatności**: Tryb ścisły aktywny — wszystkie zapytania muszą być przetwarzane lokalnie. Zewnętrzne serwery AI są zablokowane. Uruchom Ollama (`ollama serve`).';
   }
 
+  // --- DPA verification gate (RODO Art. 28) ---
+  // Cloud calls require a Data Processing Agreement with Anthropic to be in place
+  if (!config.privacy.dpaAccepted) {
+    logPrivacyEvent({ action: 'dpa_block', sessionKey: session.key, userId: session.userId, reason: 'no_dpa_accepted', provider: 'anthropic' });
+    return '⚠️ **Wymagana umowa powierzenia danych (DPA)**: Przed wysłaniem jakichkolwiek danych do Anthropic Claude wymagane jest potwierdzenie zawarcia umowy powierzenia przetwarzania danych osobowych (RODO Art. 28). Ustaw `MECENAS_DPA_ACCEPTED=true` w konfiguracji po podpisaniu DPA z Anthropic (https://privacy.claude.com). Dane mogą być przekazywane do serwerów w USA.';
+  }
+
+  // --- Cross-border transfer notice (RODO Art. 44-49) ---
+  logPrivacyEvent({ action: 'cross_border', sessionKey: session.key, userId: session.userId, caseId: activeCaseId, reason: 'data_transfer_us_anthropic', provider: 'anthropic', privacyMode: effectivePrivacyMode });
+
   const client = new Anthropic({ apiKey: config.agent.anthropicKey });
 
   // --- Privacy: create per-request anonymizer ---
@@ -2397,7 +2641,7 @@ async function handleWithAnthropic(
         }
         let result: string;
         try {
-          result = await executeTool(block.name, toolInput, db, session);
+          result = await executeTool(block.name, toolInput, db, session, config);
         } catch (toolErr) {
           // Log full error server-side, return sanitized message to LLM (no schema/path leak)
           logger.error({ err: toolErr, tool: block.name }, 'Tool execution error');
@@ -2502,7 +2746,7 @@ Jeśli nie musisz używać narzędzia, odpowiedz normalnym tekstem.`;
     logger.info({ tool: toolCall.tool, model }, 'Ollama tool call');
     let result: string;
     try {
-      result = await executeTool(toolCall.tool, toolCall.input, db, session);
+      result = await executeTool(toolCall.tool, toolCall.input, db, session, config);
     } catch (err) {
       logger.error({ err, tool: toolCall.tool }, 'Ollama tool execution error');
       result = JSON.stringify({ error: `Wewnętrzny błąd narzędzia ${toolCall.tool}. Spróbuj ponownie lub użyj innego podejścia.` });

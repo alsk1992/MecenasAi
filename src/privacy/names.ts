@@ -59,8 +59,99 @@ export const POLISH_SURNAMES = new Set([
   'Nowakowska', 'Pawłowska', 'Michalska', 'Nowicka', 'Adamczykowa',
 ]);
 
-// Combined set for quick lookup
-const ALL_FIRST_NAMES = new Set([...POLISH_FIRST_NAMES_MALE, ...POLISH_FIRST_NAMES_FEMALE]);
+// =============================================================================
+// POLISH NAME DECLINATION (GRAMMATICAL CASES)
+// =============================================================================
+
+/**
+ * Generate common Polish declinated forms of a surname.
+ * Polish has 7 grammatical cases — surnames change form:
+ * Kowalski → Kowalskiego (genitive), Kowalskiemu (dative), Kowalskim (instrumental/locative)
+ * Nowak → Nowaka (genitive), Nowakowi (dative), Nowakiem (instrumental)
+ */
+function generateSurnameForms(surname: string): string[] {
+  const forms: string[] = [surname];
+
+  // -ski/-cki/-dzki endings (adjective-type surnames — most common)
+  if (surname.endsWith('ski') || surname.endsWith('cki') || surname.endsWith('dzki')) {
+    const stem = surname.slice(0, -1); // Remove 'i'
+    forms.push(stem + 'iego');  // genitive/accusative: Kowalskiego
+    forms.push(stem + 'iemu');  // dative: Kowalskiemu
+    forms.push(surname + 'm');  // instrumental/locative: Kowalskim
+  }
+  // -ska/-cka/-dzka endings (female adjective-type)
+  else if (surname.endsWith('ska') || surname.endsWith('cka') || surname.endsWith('dzka')) {
+    const stem = surname.slice(0, -1); // Remove 'a'
+    forms.push(stem + 'iej');   // genitive/dative/locative: Kowalskiej
+    forms.push(stem + 'ą');     // instrumental: Kowalską
+  }
+  // Consonant-ending surnames (Nowak, Mazur, Baran, etc.)
+  else if (/[bcdfghjklłmnprsśtwzźż]$/i.test(surname)) {
+    forms.push(surname + 'a');    // genitive/accusative: Nowaka
+    forms.push(surname + 'owi');  // dative: Nowakowi
+    forms.push(surname + 'iem'); // instrumental: Nowakiem (simplified)
+    forms.push(surname + 'em');  // instrumental alt: Nowaczem
+  }
+
+  return forms;
+}
+
+/** Generate common declinated forms of first names */
+function generateFirstNameForms(name: string): string[] {
+  const forms: string[] = [name];
+
+  // Male names ending in consonant (Jan, Piotr, Adam)
+  if (/[bcdfghjklłmnprsśtwzźż]$/i.test(name)) {
+    forms.push(name + 'a');    // genitive: Jana
+    forms.push(name + 'owi');  // dative: Janowi
+    forms.push(name + 'em');   // instrumental: Janem
+  }
+  // Names ending in -ek (Marek, Jacek)
+  if (name.endsWith('ek')) {
+    const stem = name.slice(0, -2);
+    forms.push(stem + 'ka');     // genitive: Marka
+    forms.push(stem + 'kowi');   // dative: Markowi
+    forms.push(stem + 'kiem');   // instrumental: Markiem
+  }
+  // Female names ending in -a (Anna, Maria, Katarzyna)
+  if (name.endsWith('a')) {
+    const stem = name.slice(0, -1);
+    forms.push(stem + 'y');      // genitive: Anny
+    forms.push(stem + 'ie');     // dative/locative: Annie
+    forms.push(stem + 'ę');      // accusative: Annę
+    forms.push(stem + 'ą');      // instrumental: Anną
+  }
+
+  return forms;
+}
+
+// Build expanded sets with declinated forms
+const expandedSurnames = new Set<string>();
+for (const s of POLISH_SURNAMES) {
+  for (const form of generateSurnameForms(s)) {
+    expandedSurnames.add(form);
+  }
+}
+
+const expandedFirstNamesMale = new Set<string>();
+for (const n of POLISH_FIRST_NAMES_MALE) {
+  for (const form of generateFirstNameForms(n)) {
+    expandedFirstNamesMale.add(form);
+  }
+}
+
+const expandedFirstNamesFemale = new Set<string>();
+for (const n of POLISH_FIRST_NAMES_FEMALE) {
+  for (const form of generateFirstNameForms(n)) {
+    expandedFirstNamesFemale.add(form);
+  }
+}
+
+// Combined set for quick lookup (includes nominative + all declinated forms)
+const ALL_FIRST_NAMES = new Set([...expandedFirstNamesMale, ...expandedFirstNamesFemale]);
+
+// Export expanded surnames for use in matching
+export { expandedSurnames as POLISH_SURNAMES_EXPANDED };
 
 /**
  * Check if a two-word (or more) string matches known Polish name patterns.
@@ -71,10 +162,10 @@ export function matchPolishName(text: string): string | null {
   // First pass: 3-word names (FirstName SecondName Surname)
   const threeWordPattern = /(?<=\s|^|[("])([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)\s+([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)\s+([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)(?=\s|$|[.,;:!?)}\]"'-])/g;
   for (const m of text.matchAll(threeWordPattern)) {
-    if (ALL_FIRST_NAMES.has(m[1]) && ALL_FIRST_NAMES.has(m[2]) && POLISH_SURNAMES.has(m[3])) {
+    if (ALL_FIRST_NAMES.has(m[1]) && ALL_FIRST_NAMES.has(m[2]) && expandedSurnames.has(m[3])) {
       return `${m[1]} ${m[2]} ${m[3]}`;
     }
-    if (ALL_FIRST_NAMES.has(m[1]) && POLISH_SURNAMES.has(m[2]) && POLISH_SURNAMES.has(m[3])) {
+    if (ALL_FIRST_NAMES.has(m[1]) && expandedSurnames.has(m[2]) && expandedSurnames.has(m[3])) {
       return `${m[1]} ${m[2]} ${m[3]}`;
     }
   }
@@ -82,7 +173,7 @@ export function matchPolishName(text: string): string | null {
   // Second pass: 2-word names (FirstName Surname) — no greedy 3rd word capture
   const twoWordPattern = /(?<=\s|^|[("])([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)\s+([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)(?=\s|$|[.,;:!?)}\]"'-])/g;
   for (const m of text.matchAll(twoWordPattern)) {
-    if (ALL_FIRST_NAMES.has(m[1]) && POLISH_SURNAMES.has(m[2])) {
+    if (ALL_FIRST_NAMES.has(m[1]) && expandedSurnames.has(m[2])) {
       return `${m[1]} ${m[2]}`;
     }
   }
@@ -102,8 +193,8 @@ export function findPolishNames(text: string): Array<{ name: string; index: numb
   const threeWordPattern = /(?<=\s|^|[("])([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)\s+([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)\s+([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)(?=\s|$|[.,;:!?)}\]"'-])/g;
   for (const m of text.matchAll(threeWordPattern)) {
     if (
-      (ALL_FIRST_NAMES.has(m[1]) && ALL_FIRST_NAMES.has(m[2]) && POLISH_SURNAMES.has(m[3])) ||
-      (ALL_FIRST_NAMES.has(m[1]) && POLISH_SURNAMES.has(m[2]) && POLISH_SURNAMES.has(m[3]))
+      (ALL_FIRST_NAMES.has(m[1]) && ALL_FIRST_NAMES.has(m[2]) && expandedSurnames.has(m[3])) ||
+      (ALL_FIRST_NAMES.has(m[1]) && expandedSurnames.has(m[2]) && expandedSurnames.has(m[3]))
     ) {
       const name = `${m[1]} ${m[2]} ${m[3]}`;
       results.push({ name, index: m.index! });
@@ -114,7 +205,7 @@ export function findPolishNames(text: string): Array<{ name: string; index: numb
   // Second pass: 2-word names — skip ranges already covered by 3-word matches
   const twoWordPattern = /(?<=\s|^|[("])([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)\s+([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)(?=\s|$|[.,;:!?)}\]"'-])/g;
   for (const m of text.matchAll(twoWordPattern)) {
-    if (ALL_FIRST_NAMES.has(m[1]) && POLISH_SURNAMES.has(m[2])) {
+    if (ALL_FIRST_NAMES.has(m[1]) && expandedSurnames.has(m[2])) {
       const idx = m.index!;
       const end = idx + m[0].length;
       // Skip if overlaps with an already-found 3-word name
