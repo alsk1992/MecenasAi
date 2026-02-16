@@ -68,22 +68,22 @@ const ALL_FIRST_NAMES = new Set([...POLISH_FIRST_NAMES_MALE, ...POLISH_FIRST_NAM
  * Returns the matched name or null.
  */
 export function matchPolishName(text: string): string | null {
-  // Match sequences of 2-3 capitalized Polish words
-  const namePattern = /\b([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)\s+([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)(?:\s+([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+))?\b/g;
-
-  for (const m of text.matchAll(namePattern)) {
-    const first = m[1];
-    const second = m[2];
-    const third = m[3];
-
-    // Pattern: FirstName Surname
-    if (ALL_FIRST_NAMES.has(first) && POLISH_SURNAMES.has(second)) {
-      return third ? `${first} ${second} ${third}` : `${first} ${second}`;
+  // First pass: 3-word names (FirstName SecondName Surname)
+  const threeWordPattern = /(?<=\s|^)([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)\s+([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)\s+([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)(?=\s|$|[.,;:!?)}\]])/g;
+  for (const m of text.matchAll(threeWordPattern)) {
+    if (ALL_FIRST_NAMES.has(m[1]) && ALL_FIRST_NAMES.has(m[2]) && POLISH_SURNAMES.has(m[3])) {
+      return `${m[1]} ${m[2]} ${m[3]}`;
     }
+    if (ALL_FIRST_NAMES.has(m[1]) && POLISH_SURNAMES.has(m[2]) && POLISH_SURNAMES.has(m[3])) {
+      return `${m[1]} ${m[2]} ${m[3]}`;
+    }
+  }
 
-    // Pattern: FirstName SecondName Surname (e.g. "Jan Maria Kowalski")
-    if (third && ALL_FIRST_NAMES.has(first) && ALL_FIRST_NAMES.has(second) && POLISH_SURNAMES.has(third)) {
-      return `${first} ${second} ${third}`;
+  // Second pass: 2-word names (FirstName Surname) — no greedy 3rd word capture
+  const twoWordPattern = /(?<=\s|^)([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)\s+([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)(?=\s|$|[.,;:!?)}\]])/g;
+  for (const m of text.matchAll(twoWordPattern)) {
+    if (ALL_FIRST_NAMES.has(m[1]) && POLISH_SURNAMES.has(m[2])) {
+      return `${m[1]} ${m[2]}`;
     }
   }
 
@@ -96,18 +96,30 @@ export function matchPolishName(text: string): string | null {
  */
 export function findPolishNames(text: string): Array<{ name: string; index: number }> {
   const results: Array<{ name: string; index: number }> = [];
-  const namePattern = /\b([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)\s+([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)(?:\s+([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+))?\b/g;
+  const usedRanges: Array<[number, number]> = [];
 
-  for (const m of text.matchAll(namePattern)) {
-    const first = m[1];
-    const second = m[2];
-    const third = m[3];
-
-    if (ALL_FIRST_NAMES.has(first) && POLISH_SURNAMES.has(second)) {
-      const name = third ? `${first} ${second} ${third}` : `${first} ${second}`;
+  // First pass: 3-word names (FirstName SecondName Surname)
+  const threeWordPattern = /(?<=\s|^)([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)\s+([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)\s+([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)(?=\s|$|[.,;:!?)}\]])/g;
+  for (const m of text.matchAll(threeWordPattern)) {
+    if (
+      (ALL_FIRST_NAMES.has(m[1]) && ALL_FIRST_NAMES.has(m[2]) && POLISH_SURNAMES.has(m[3])) ||
+      (ALL_FIRST_NAMES.has(m[1]) && POLISH_SURNAMES.has(m[2]) && POLISH_SURNAMES.has(m[3]))
+    ) {
+      const name = `${m[1]} ${m[2]} ${m[3]}`;
       results.push({ name, index: m.index! });
-    } else if (third && ALL_FIRST_NAMES.has(first) && ALL_FIRST_NAMES.has(second) && POLISH_SURNAMES.has(third)) {
-      results.push({ name: `${first} ${second} ${third}`, index: m.index! });
+      usedRanges.push([m.index!, m.index! + m[0].length]);
+    }
+  }
+
+  // Second pass: 2-word names — skip ranges already covered by 3-word matches
+  const twoWordPattern = /(?<=\s|^)([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)\s+([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)(?=\s|$|[.,;:!?)}\]])/g;
+  for (const m of text.matchAll(twoWordPattern)) {
+    if (ALL_FIRST_NAMES.has(m[1]) && POLISH_SURNAMES.has(m[2])) {
+      const idx = m.index!;
+      const end = idx + m[0].length;
+      // Skip if overlaps with an already-found 3-word name
+      if (usedRanges.some(([s, e]) => idx < e && end > s)) continue;
+      results.push({ name: `${m[1]} ${m[2]}`, index: idx });
     }
   }
 

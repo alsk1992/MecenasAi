@@ -155,7 +155,7 @@ const PASSPORT_RE = /\b([A-Z]{2}\d{7})\b/g;
 const ADDRESS_RE = /(?:ul\.|al\.|pl\.|os\.|ulica|aleja)\s+[A-ZŁŚŹŻĆŃ][a-złóśćźżęąń]+(?:\s+[A-ZŁŚŹŻĆŃ]?[a-złóśćźżęąń]+)*\s+\d+[a-zA-Z]?(?:\/\d+[a-zA-Z]?)?/gi;
 
 // Company names with Polish legal suffixes
-const COMPANY_NAME_RE = /\b[A-ZŁŚŹŻĆŃ][a-złóśćźżęąń]+(?:\s+[A-ZŁŚŹŻĆŃa-złóśćźżęąń]+)*\s+(?:sp\.\s*z\s*o\.?\s*o\.?|S\.?A\.?|sp\.\s*j\.?|sp\.\s*k\.?|sp\.\s*p\.?|s\.?\s*c\.?)\b/g;
+const COMPANY_NAME_RE = /(?<=\s|^)[A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+(?:\s+[A-ZŁŚŹŻĆŃĘĄÓa-złóśćźżęąń]+)*\s+(?:sp\.\s*z\s*o\.?\s*o\.?|S\.?A\.?|sp\.\s*j\.?|sp\.\s*k\.?|sp\.\s*p\.?|s\.?\s*c\.?)(?=\s|$|[.,;:!?)\]])/g;
 
 // =============================================================================
 // SENSITIVE KEYWORDS (Polish legal terms indicating PII context)

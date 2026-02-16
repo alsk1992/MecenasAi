@@ -314,8 +314,8 @@ const MIGRATIONS: Record<number, string[]> = {
       FOREIGN KEY (case_id) REFERENCES cases(id) ON DELETE CASCADE
     )`,
     'CREATE INDEX IF NOT EXISTS idx_consent_case ON ai_consent(case_id)',
-    // Per-case privacy mode override
-    `ALTER TABLE cases ADD COLUMN privacy_mode TEXT DEFAULT NULL`,
+    // Per-case privacy mode override (handled specially in runMigrations for idempotency)
+    `__ADD_COLUMN_IF_NOT_EXISTS__ cases privacy_mode TEXT DEFAULT NULL`,
   ],
 };
 
@@ -351,7 +351,20 @@ function runMigrations(sqlDb: import('sql.js').Database): void {
     try {
       sqlDb.run('BEGIN');
       for (const stmt of stmts) {
-        sqlDb.run(stmt);
+        if (stmt.startsWith('__ADD_COLUMN_IF_NOT_EXISTS__')) {
+          // Parse: __ADD_COLUMN_IF_NOT_EXISTS__ <table> <column> <type> [DEFAULT ...]
+          const parts = stmt.replace('__ADD_COLUMN_IF_NOT_EXISTS__', '').trim().split(/\s+/);
+          const table = parts[0];
+          const col = parts[1];
+          const colDef = parts.slice(1).join(' ');
+          const existing = sqlDb.exec(`SELECT COUNT(*) FROM pragma_table_info('${table}') WHERE name = '${col}'`);
+          const exists = existing.length && existing[0].values[0][0] as number > 0;
+          if (!exists) {
+            sqlDb.run(`ALTER TABLE ${table} ADD COLUMN ${colDef}`);
+          }
+        } else {
+          sqlDb.run(stmt);
+        }
       }
       sqlDb.run('COMMIT');
       logger.info({ migration: v }, 'Migration applied');
@@ -846,10 +859,17 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
     },
 
     deleteCase(id: string) {
-      // Cascade: delete documents, deadlines, time entries linked to this case
+      // Cascade: delete all data linked to this case
+      const docs = sqlDb.exec('SELECT id FROM documents WHERE case_id = ?', [id]);
+      if (docs.length) {
+        for (const row of docs[0].values) {
+          sqlDb.run("DELETE FROM embeddings WHERE source_type = 'document' AND source_id = ?", [row[0] as string]);
+        }
+      }
       sqlDb.run('DELETE FROM documents WHERE case_id = ?', [id]);
       sqlDb.run('DELETE FROM deadlines WHERE case_id = ?', [id]);
       sqlDb.run('DELETE FROM time_entries WHERE case_id = ?', [id]);
+      sqlDb.run('DELETE FROM ai_consent WHERE case_id = ?', [id]);
       sqlDb.run('DELETE FROM cases WHERE id = ?', [id]);
       scheduleSave();
     },
@@ -1139,6 +1159,7 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
         status: v[6] as any, issuedAt: new Date(v[7] as number),
         dueAt: new Date(v[8] as number),
         paidAt: v[9] ? new Date(v[9] as number) : undefined,
+        notes: v[10] as string | undefined,
         createdAt: new Date(v[11] as number),
       };
     },
@@ -1159,6 +1180,7 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
         status: v[6] as any, issuedAt: new Date(v[7] as number),
         dueAt: new Date(v[8] as number),
         paidAt: v[9] ? new Date(v[9] as number) : undefined,
+        notes: v[10] as string | undefined,
         createdAt: new Date(v[11] as number),
       }));
     },
@@ -1415,7 +1437,7 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
           for (const row of allSessions[0].values) {
             const key = row[0] as string;
             const messagesStr = row[1] as string;
-            if (messagesStr.includes(client.name) || (client.pesel && messagesStr.includes(client.pesel))) {
+            if (messagesStr.includes(client.name) || (client.pesel && messagesStr.includes(client.pesel)) || (client.address && messagesStr.includes(client.address))) {
               // Replace client PII in messages with [USUNIĘTO]
               let cleaned = messagesStr;
               cleaned = cleaned.split(client.name).join('[USUNIĘTO-KLIENT]');
@@ -1423,6 +1445,7 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
               if (client.nip) cleaned = cleaned.split(client.nip).join('[USUNIĘTO-NIP]');
               if (client.phone) cleaned = cleaned.split(client.phone).join('[USUNIĘTO-TEL]');
               if (client.email) cleaned = cleaned.split(client.email).join('[USUNIĘTO-EMAIL]');
+              if (client.address) cleaned = cleaned.split(client.address).join('[USUNIĘTO-ADRES]');
               sqlDb.run('UPDATE sessions SET messages = ? WHERE key = ?', [cleaned, key]);
               deletedSessions++;
             }

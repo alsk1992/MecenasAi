@@ -58,11 +58,27 @@ export class Anonymizer {
     const result = detectPii(text);
     if (!result.hasPii) return text;
 
-    // Sort matches by index descending so replacements don't shift positions
-    const sorted = [...result.matches].sort((a, b) => b.index - a.index);
+    // Deduplicate overlapping matches — keep the longest match per overlapping range
+    const byStart = [...result.matches].sort((a, b) => a.index - b.index || b.value.length - a.value.length);
+    const deduped: typeof byStart = [];
+    for (const match of byStart) {
+      const end = match.index + match.value.length;
+      const last = deduped[deduped.length - 1];
+      if (last && match.index < last.index + last.value.length) {
+        // Overlapping — keep the longer one
+        if (match.value.length > last.value.length) {
+          deduped[deduped.length - 1] = match;
+        }
+        continue;
+      }
+      deduped.push(match);
+    }
+
+    // Sort by index descending so replacements don't shift positions
+    deduped.sort((a, b) => b.index - a.index);
 
     let out = text;
-    for (const match of sorted) {
+    for (const match of deduped) {
       const placeholder = this.getOrCreatePlaceholder(match.type, match.value);
       out = out.slice(0, match.index) + placeholder + out.slice(match.index + match.value.length);
     }

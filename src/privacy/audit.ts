@@ -20,6 +20,8 @@ export type PrivacyAction =
   | 'session_purge'     // Session auto-purged (expired)
   | 'gdpr_delete'       // RODO right-to-deletion executed
   | 'consent_record'    // AI consent recorded for case
+  | 'consent_check'     // AI consent checked for case
+  | 'consent_revoke'    // AI consent revoked for case
   | 'mode_change';      // Privacy mode changed
 
 export interface AuditEntry {

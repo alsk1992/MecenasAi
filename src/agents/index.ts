@@ -573,7 +573,7 @@ const TOOLS: ToolDef[] = [
     input_schema: {
       type: 'object',
       properties: {
-        case_id: { type: 'string', description: 'ID sprawy (opcjonalnie — używa aktywnej sprawy)' },
+        caseId: { type: 'string', description: 'ID sprawy (opcjonalnie — używa aktywnej sprawy)' },
       },
     },
   },
@@ -1937,7 +1937,7 @@ async function executeTool(name: string, input: Record<string, unknown>, db: Dat
         const chkCaseId = resolveCaseId(input, session);
         if (!chkCaseId) return JSON.stringify({ error: 'ID sprawy jest wymagane.' });
         const consent = db.getAiConsent(chkCaseId);
-        logPrivacyEvent({ action: 'consent_record', sessionKey: session.key, userId: session.userId, caseId: chkCaseId, reason: 'consent_check' });
+        logPrivacyEvent({ action: 'consent_check', sessionKey: session.key, userId: session.userId, caseId: chkCaseId, reason: 'consent_checked' });
         if (!consent) return JSON.stringify({ hasConsent: false, message: 'Brak zgody na AI dla tej sprawy.' });
         return JSON.stringify({ hasConsent: true, consent });
       }
@@ -1946,7 +1946,7 @@ async function executeTool(name: string, input: Record<string, unknown>, db: Dat
         if (!revCaseId) return JSON.stringify({ error: 'ID sprawy jest wymagane.' });
         const revoked = db.revokeAiConsent(revCaseId);
         if (!revoked) return JSON.stringify({ error: 'Brak aktywnej zgody do cofnięcia.' });
-        logPrivacyEvent({ action: 'consent_record', sessionKey: session.key, userId: session.userId, caseId: revCaseId, reason: 'consent_revoked' });
+        logPrivacyEvent({ action: 'consent_revoke', sessionKey: session.key, userId: session.userId, caseId: revCaseId, reason: 'consent_revoked' });
         return JSON.stringify({ success: true, message: 'Zgoda na AI cofnięta.' });
       }
       case 'gdpr_delete_client': {
@@ -2359,8 +2359,9 @@ async function handleWithAnthropic(
           const safeMsg = toolErr instanceof Error ? toolErr.message.slice(0, 200) : 'Nieznany błąd';
           result = JSON.stringify({ error: anonymizer ? anonymizer.anonymize(safeMsg) : safeMsg });
         }
-        // Re-anonymize tool result before sending back to cloud
-        const anonResult = anonymizer ? anonymizer.anonymize(result) : result;
+        // Truncate + re-anonymize tool result before sending back to cloud
+        const truncResult = result.length > 16000 ? result.slice(0, 16000) + '\n...[wynik skrócony]' : result;
+        const anonResult = anonymizer ? anonymizer.anonymize(truncResult) : truncResult;
         toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: anonResult });
       }
     }
@@ -2438,7 +2439,17 @@ Jeśli nie musisz używać narzędzia, odpowiedz normalnym tekstem.`;
 
     turns++;
     logger.info({ tool: toolCall.tool, model }, 'Ollama tool call');
-    const result = await executeTool(toolCall.tool, toolCall.input, db, session);
+    let result: string;
+    try {
+      result = await executeTool(toolCall.tool, toolCall.input, db, session);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message.slice(0, 100) : 'unknown';
+      result = JSON.stringify({ error: `Błąd narzędzia ${toolCall.tool}: ${msg}` });
+    }
+    // Truncate large results to prevent Ollama context overflow
+    if (result.length > 16000) {
+      result = result.slice(0, 16000) + '\n...[wynik skrócony]';
+    }
 
     conversationHistory.push({ role: 'assistant', content: response });
     conversationHistory.push({ role: 'user', content: `Wynik narzędzia ${toolCall.tool}:\n${result}\n\nTeraz odpowiedz użytkownikowi na podstawie wyniku narzędzia.` });

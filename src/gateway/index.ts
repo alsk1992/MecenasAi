@@ -118,15 +118,21 @@ export async function createGateway(config: Config): Promise<AppGateway> {
 
     try {
       const responsePromise = agent.handleMessage(message.text, session);
+      let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
       const timeoutPromise = new Promise<null>((_, reject) => {
-        const timer = setTimeout(() => reject(new Error('TIMEOUT')), MESSAGE_TIMEOUT_MS);
+        timeoutTimer = setTimeout(() => reject(new Error('TIMEOUT')), MESSAGE_TIMEOUT_MS);
         abortController.signal.addEventListener('abort', () => {
-          clearTimeout(timer);
+          if (timeoutTimer) clearTimeout(timeoutTimer);
           reject(new Error('CANCELLED'));
         });
       });
 
-      const response = await Promise.race([responsePromise, timeoutPromise]);
+      let response: string | null;
+      try {
+        response = await Promise.race([responsePromise, timeoutPromise]);
+      } finally {
+        if (timeoutTimer) clearTimeout(timeoutTimer);
+      }
 
       if (response) {
         session.messages.push({
