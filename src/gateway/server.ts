@@ -149,7 +149,7 @@ export function createServer(config: Config, db: Database): HttpServer {
           return;
         }
 
-        const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
+        const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
         const pathname = url.pathname;
 
         // Static files for WebChat — no auth required
@@ -357,7 +357,7 @@ export function createServer(config: Config, db: Database): HttpServer {
           return;
         }
 
-        if (pathname.startsWith('/api/documents/') && req.method === 'GET') {
+        if (pathname.startsWith('/api/documents/') && !pathname.endsWith('/export') && req.method === 'GET') {
           const parts = pathname.split('/');
           const id = parts[3];
           if (parts[4] === 'versions') {
@@ -385,11 +385,16 @@ export function createServer(config: Config, db: Database): HttpServer {
           let body = '';
           let bodySize = 0;
           const MAX_BODY = 1_048_576; // 1 MB
+          let bodyAborted = false;
           req.on('data', (chunk) => {
+            if (bodyAborted) return;
             bodySize += chunk.length;
             if (bodySize > MAX_BODY) {
-              res.writeHead(413, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ error: 'Zbyt duże żądanie' }));
+              bodyAborted = true;
+              if (!res.headersSent) {
+                res.writeHead(413, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Zbyt duże żądanie' }));
+              }
               req.destroy();
               return;
             }
@@ -469,7 +474,7 @@ export function createServer(config: Config, db: Database): HttpServer {
             return;
           }
           generateDocx(doc, db).then((buffer) => {
-            const filename = `${doc.title.replace(/[^a-zA-Z0-9ąćęłńóśźżĄĆĘŁŃÓŚŹŻ\s_-]/g, '').replace(/[\r\n\0]/g, '').trim().replace(/\s+/g, '_').slice(0, 200)}.docx`;
+            const filename = `${doc.title.replace(/[^a-zA-Z0-9ąćęłńóśźżĄĆĘŁŃÓŚŹŻ\s_-]/g, '').replace(/[\r\n\0"]/g, '').trim().replace(/\s+/g, '_').slice(0, 200)}.docx`;
             res.writeHead(200, {
               'Content-Type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
               'Content-Disposition': `attachment; filename="${filename}"`,
@@ -516,7 +521,7 @@ export function createServer(config: Config, db: Database): HttpServer {
               court: data.court as string | undefined,
               description: data.description as string | undefined,
               opposingParty: data.opposingParty as string | undefined,
-              valueOfDispute: data.valueOfDispute as number | undefined,
+              valueOfDispute: data.valueOfDispute != null ? (Number.isFinite(Number(data.valueOfDispute)) ? Number(data.valueOfDispute) : undefined) : undefined,
             });
             res.writeHead(201, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify(c));
@@ -713,12 +718,30 @@ export function createServer(config: Config, db: Database): HttpServer {
               res.end(JSON.stringify({ error: 'caseId, description i durationMinutes są wymagane' }));
               return;
             }
+            const duration = Number(data.durationMinutes);
+            if (!Number.isFinite(duration) || duration <= 0) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'durationMinutes musi być liczbą dodatnią' }));
+              return;
+            }
+            const hourlyRate = data.hourlyRate != null ? Number(data.hourlyRate) : undefined;
+            if (hourlyRate !== undefined && (!Number.isFinite(hourlyRate) || hourlyRate < 0)) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'hourlyRate musi być liczbą nieujemną' }));
+              return;
+            }
+            const entryDate = data.date ? new Date(data.date as string) : new Date();
+            if (isNaN(entryDate.getTime())) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Nieprawidłowa data' }));
+              return;
+            }
             const entry = db.createTimeEntry({
               caseId: data.caseId as string,
               description: data.description as string,
-              durationMinutes: data.durationMinutes as number,
-              hourlyRate: data.hourlyRate as number | undefined,
-              date: data.date ? new Date(data.date as string) : new Date(),
+              durationMinutes: duration,
+              hourlyRate,
+              date: entryDate,
             });
             res.writeHead(201, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify(entry));

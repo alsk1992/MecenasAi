@@ -4,6 +4,12 @@
  */
 import { Storage } from './storage.js';
 
+/** Escape HTML-special characters to prevent XSS in innerHTML */
+function esc(s) {
+  if (!s) return '';
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
 export class Sidebar {
   constructor(sidebarEl) {
     this.sidebarEl = sidebarEl;
@@ -1251,9 +1257,11 @@ export class Sidebar {
           const total = data.info?.totalResults ?? items.length;
           resultEl.innerHTML = `<strong>${total.toLocaleString('pl-PL')} wyników</strong>\n\n`
             + items.slice(0, 5).map(item => {
-              const caseNums = (item.courtCases ?? []).map(c => c.caseNumber).join(', ');
-              const court = item.division?.court?.name ?? '';
-              return `<div class="saos-item"><span class="saos-case-num">${caseNums}</span> (${item.judgmentDate ?? ''})\n${court}\n<a href="https://www.saos.org.pl/judgments/${item.id}" target="_blank">Zobacz →</a></div>`;
+              const caseNums = (item.courtCases ?? []).map(c => esc(c.caseNumber)).join(', ');
+              const court = esc(item.division?.court?.name ?? '');
+              const jDate = esc(item.judgmentDate ?? '');
+              const jId = encodeURIComponent(item.id ?? '');
+              return `<div class="saos-item"><span class="saos-case-num">${caseNums}</span> (${jDate})\n${court}\n<a href="https://www.saos.org.pl/judgments/${jId}" target="_blank">Zobacz →</a></div>`;
             }).join('');
         } catch {
           resultEl.innerHTML = '<span class="result-warning">Nie udało się połączyć z SAOS</span>';
@@ -1277,13 +1285,13 @@ export class Sidebar {
           if (!r.ok) { resultEl.innerHTML = '<span class="result-warning">Błąd API</span>'; return; }
           const data = await r.json();
           const items = data?.data ?? [];
-          if (items.length === 0) { resultEl.innerHTML = `Nie znaleziono "${query}".`; return; }
+          if (items.length === 0) { resultEl.textContent = `Nie znaleziono "${query}".`; return; }
           resultEl.innerHTML = items.slice(0, 3).map(item => {
             const a = item.attributes ?? {};
-            return `<strong>${a.krs_podmioty_nazwa ?? '?'}</strong>\n`
-              + `KRS: ${a.krs_podmioty_krs ?? '-'} | NIP: ${a.krs_podmioty_nip ?? '-'}\n`
-              + `REGON: ${a.krs_podmioty_regon ?? '-'}\n`
-              + `${a.krs_podmioty_adres_miejscowosc ?? ''}`;
+            return `<strong>${esc(a.krs_podmioty_nazwa ?? '?')}</strong>\n`
+              + `KRS: ${esc(a.krs_podmioty_krs ?? '-')} | NIP: ${esc(a.krs_podmioty_nip ?? '-')}\n`
+              + `REGON: ${esc(a.krs_podmioty_regon ?? '-')}\n`
+              + `${esc(a.krs_podmioty_adres_miejscowosc ?? '')}`;
           }).join('\n\n');
         } catch {
           resultEl.innerHTML = '<span class="result-warning">Nie udało się połączyć z KRS</span>';

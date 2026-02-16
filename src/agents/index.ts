@@ -2338,14 +2338,23 @@ async function handleWithAnthropic(
     logger.warn({ configured: config.agent.model, using: anthropicModel }, 'Model name nie zaczyna się od "claude" — użyto domyślnego');
   }
 
-  let response = await client.messages.create({
-    model: anthropicModel,
-    max_tokens: config.agent.maxTokens,
-    temperature: config.agent.temperature,
-    system: systemPrompt,
-    tools: anthropicTools,
-    messages,
-  });
+  let response;
+  try {
+    response = await client.messages.create({
+      model: anthropicModel,
+      max_tokens: config.agent.maxTokens,
+      temperature: config.agent.temperature,
+      system: systemPrompt,
+      tools: anthropicTools,
+      messages,
+    });
+  } catch (apiErr) {
+    logger.error({ err: apiErr }, 'Anthropic API error');
+    const statusCode = (apiErr as any)?.status;
+    if (statusCode === 401) return '⚠️ Błąd autoryzacji Anthropic API — sprawdź klucz API w konfiguracji.';
+    if (statusCode === 429) return '⚠️ Limit zapytań Anthropic API przekroczony — spróbuj ponownie za chwilę.';
+    return 'Przepraszam, wystąpił błąd komunikacji z serwerem AI. Spróbuj ponownie.';
+  }
 
   let turns = 0;
   while (response.stop_reason === 'tool_use' && turns < 10) {
@@ -2362,15 +2371,21 @@ async function handleWithAnthropic(
         if (anonymizer) {
           const rawJson = JSON.stringify(toolInput);
           const deAnon = anonymizer.deanonymize(rawJson);
-          try { toolInput = JSON.parse(deAnon); } catch { /* use original */ }
+          try {
+            toolInput = JSON.parse(deAnon);
+          } catch (parseErr) {
+            logger.warn({ rawJson: rawJson.slice(0, 200), err: parseErr }, 'Deanonymization corrupted JSON — skipping tool execution');
+            toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify({ error: 'Błąd deanonimizacji danych wejściowych narzędzia.' }) });
+            continue;
+          }
         }
         let result: string;
         try {
           result = await executeTool(block.name, toolInput, db, session);
         } catch (toolErr) {
-          // Sanitize error message — may contain PII from DB operations
-          const safeMsg = toolErr instanceof Error ? toolErr.message.slice(0, 200) : 'Nieznany błąd';
-          result = JSON.stringify({ error: anonymizer ? anonymizer.anonymize(safeMsg) : safeMsg });
+          // Log full error server-side, return sanitized message to LLM (no schema/path leak)
+          logger.error({ err: toolErr, tool: block.name }, 'Tool execution error');
+          result = JSON.stringify({ error: `Wewnętrzny błąd narzędzia ${block.name}. Spróbuj ponownie lub użyj innego podejścia.` });
         }
         // Truncate + re-anonymize tool result before sending back to cloud
         const truncResult = result.length > 16000 ? result.slice(0, 16000) + '\n...[wynik skrócony]' : result;
@@ -2390,22 +2405,39 @@ async function handleWithAnthropic(
       : buildSystemPrompt(session, db);
     const anonLoopSystem = anonymizer ? anonymizer.anonymize(loopSystemPrompt) : loopSystemPrompt;
 
-    response = await client.messages.create({
-      model: anthropicModel,
-      max_tokens: config.agent.maxTokens,
-      temperature: config.agent.temperature,
-      system: anonLoopSystem,
-      tools: anthropicTools,
-      messages,
-    });
+    try {
+      response = await client.messages.create({
+        model: anthropicModel,
+        max_tokens: config.agent.maxTokens,
+        temperature: config.agent.temperature,
+        system: anonLoopSystem,
+        tools: anthropicTools,
+        messages,
+      });
+    } catch (apiErr) {
+      logger.error({ err: apiErr, turn: turns }, 'Anthropic API error during tool loop');
+      break; // Return whatever we have so far
+    }
   }
 
   const textBlocks = response.content.filter((b: any) => b.type === 'text');
-  const rawResponse = textBlocks.map((b: any) => b.text ?? '').filter(Boolean).join('\n') || null;
+  let rawResponse = textBlocks.map((b: any) => b.text ?? '').filter(Boolean).join('\n') || null;
+
+  // If we hit the tool turn limit without a text response, return a user-friendly message
+  if (!rawResponse && turns >= 10) {
+    logger.warn({ turns }, 'Anthropic tool turn limit reached without text response');
+    rawResponse = 'Przepraszam, osiągnąłem limit operacji przetwarzania. Spróbuj sformułować pytanie prościej lub podziel je na mniejsze kroki.';
+  }
 
   // De-anonymize the response before returning to user
   if (rawResponse && anonymizer) {
-    return anonymizer.deanonymize(rawResponse);
+    let deAnon = anonymizer.deanonymize(rawResponse);
+    // Check for residual placeholders the LLM may have modified
+    if (deAnon.includes('<<MECENAS_')) {
+      logger.warn('Residual <<MECENAS_>> placeholders detected after deanonymization — stripping');
+      deAnon = deAnon.replace(/<<MECENAS_[A-Z]+_\d+>>/g, '[dane osobowe]');
+    }
+    return deAnon;
   }
   return rawResponse;
 }
@@ -2468,6 +2500,12 @@ Jeśli nie musisz używać narzędzia, odpowiedz normalnym tekstem.`;
     conversationHistory.push({ role: 'user', content: `Wynik narzędzia ${toolCall.tool}:\n${result}\n\nTeraz odpowiedz użytkownikowi na podstawie wyniku narzędzia.` });
 
     response = await callOllama(ollamaUrl, model, systemWithTools, conversationHistory, config.agent.temperature, config.agent.maxTokens);
+  }
+
+  // If response is still a tool call JSON after hitting the limit, return a user-friendly message
+  if (turns >= 10 && parseToolCall(response)) {
+    logger.warn({ turns }, 'Ollama tool turn limit reached — response is still a tool call');
+    return 'Przepraszam, osiągnąłem limit operacji przetwarzania. Spróbuj sformułować pytanie prościej lub podziel je na mniejsze kroki.';
   }
 
   return response || null;
@@ -2578,8 +2616,15 @@ export function startDeadlineReminders(
   const sentReminders = new Set<string>();
 
   function check(): void {
-    // Cap sentinel growth — clear after 5000 entries (prevents unbounded memory)
-    if (sentReminders.size > 5000) sentReminders.clear();
+    // Cap sentinel growth — evict oldest half (Sets maintain insertion order)
+    if (sentReminders.size > 5000) {
+      const toKeep = Math.floor(sentReminders.size / 2);
+      let skip = sentReminders.size - toKeep;
+      for (const key of sentReminders) {
+        if (skip-- <= 0) break;
+        sentReminders.delete(key);
+      }
+    }
 
     try {
       const allDeadlines = db.listDeadlines({ completed: false });

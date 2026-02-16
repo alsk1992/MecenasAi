@@ -867,18 +867,25 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
     },
 
     deleteCase(id: string) {
-      // Cascade: delete all data linked to this case
-      const docs = sqlDb.exec('SELECT id FROM documents WHERE case_id = ?', [id]);
-      if (docs.length) {
-        for (const row of docs[0].values) {
-          sqlDb.run("DELETE FROM embeddings WHERE source_type = 'document' AND source_id = ?", [row[0] as string]);
+      // Cascade: delete all data linked to this case (transaction for atomicity)
+      sqlDb.run('BEGIN');
+      try {
+        const docs = sqlDb.exec('SELECT id FROM documents WHERE case_id = ?', [id]);
+        if (docs.length) {
+          for (const row of docs[0].values) {
+            sqlDb.run("DELETE FROM embeddings WHERE source_type = 'document' AND source_id = ?", [row[0] as string]);
+          }
         }
+        sqlDb.run('DELETE FROM documents WHERE case_id = ?', [id]);
+        sqlDb.run('DELETE FROM deadlines WHERE case_id = ?', [id]);
+        sqlDb.run('DELETE FROM time_entries WHERE case_id = ?', [id]);
+        sqlDb.run('DELETE FROM ai_consent WHERE case_id = ?', [id]);
+        sqlDb.run('DELETE FROM cases WHERE id = ?', [id]);
+        sqlDb.run('COMMIT');
+      } catch (err) {
+        sqlDb.run('ROLLBACK');
+        throw err;
       }
-      sqlDb.run('DELETE FROM documents WHERE case_id = ?', [id]);
-      sqlDb.run('DELETE FROM deadlines WHERE case_id = ?', [id]);
-      sqlDb.run('DELETE FROM time_entries WHERE case_id = ?', [id]);
-      sqlDb.run('DELETE FROM ai_consent WHERE case_id = ?', [id]);
-      sqlDb.run('DELETE FROM cases WHERE id = ?', [id]);
       scheduleSave();
     },
 
@@ -1421,61 +1428,69 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
       let deletedSessions = 0;
       const scrubbedSessionKeys: string[] = [];
 
-      // Delete all case-linked data (including embeddings derived from documents)
-      for (const c of cases) {
-        const docs = sqlDb.exec('SELECT id FROM documents WHERE case_id = ?', [c.id]);
-        if (docs.length) {
-          deletedDocuments += docs[0].values.length;
-          for (const row of docs[0].values) {
-            sqlDb.run("DELETE FROM embeddings WHERE source_type = 'document' AND source_id = ?", [row[0] as string]);
+      // Transaction for atomicity — partial GDPR deletion is worse than none
+      sqlDb.run('BEGIN');
+      try {
+        // Delete all case-linked data (including embeddings derived from documents)
+        for (const c of cases) {
+          const docs = sqlDb.exec('SELECT id FROM documents WHERE case_id = ?', [c.id]);
+          if (docs.length) {
+            deletedDocuments += docs[0].values.length;
+            for (const row of docs[0].values) {
+              sqlDb.run("DELETE FROM embeddings WHERE source_type = 'document' AND source_id = ?", [row[0] as string]);
+            }
           }
+          sqlDb.run('DELETE FROM documents WHERE case_id = ?', [c.id]);
+          sqlDb.run('DELETE FROM deadlines WHERE case_id = ?', [c.id]);
+          sqlDb.run('DELETE FROM time_entries WHERE case_id = ?', [c.id]);
+          sqlDb.run('DELETE FROM ai_consent WHERE case_id = ?', [c.id]);
         }
-        sqlDb.run('DELETE FROM documents WHERE case_id = ?', [c.id]);
-        sqlDb.run('DELETE FROM deadlines WHERE case_id = ?', [c.id]);
-        sqlDb.run('DELETE FROM time_entries WHERE case_id = ?', [c.id]);
-        sqlDb.run('DELETE FROM ai_consent WHERE case_id = ?', [c.id]);
-      }
 
-      // Delete invoices
-      sqlDb.run('DELETE FROM invoices WHERE client_id = ?', [clientId]);
+        // Delete invoices
+        sqlDb.run('DELETE FROM invoices WHERE client_id = ?', [clientId]);
 
-      // Delete cases
-      sqlDb.run('DELETE FROM cases WHERE client_id = ?', [clientId]);
-      if (client) {
-        const allSessions = sqlDb.exec('SELECT key, messages, metadata FROM sessions');
-        if (allSessions.length) {
-          for (const row of allSessions[0].values) {
-            const key = row[0] as string;
-            const messagesStr = row[1] as string;
-            const metadataStr = (row[2] as string) ?? '';
-            const hasPii = messagesStr.includes(client.name) || metadataStr.includes(client.name)
-              || (client.pesel && (messagesStr.includes(client.pesel) || metadataStr.includes(client.pesel)))
-              || (client.address && (messagesStr.includes(client.address) || metadataStr.includes(client.address)));
-            if (hasPii) {
-              // Replace client PII in messages with [USUNIĘTO]
-              let cleanedMsg = messagesStr;
-              let cleanedMeta = metadataStr;
-              const scrub = (text: string) => {
-                let t = text.split(client!.name).join('[USUNIĘTO-KLIENT]');
-                if (client!.pesel) t = t.split(client!.pesel).join('[USUNIĘTO-PESEL]');
-                if (client!.nip) t = t.split(client!.nip).join('[USUNIĘTO-NIP]');
-                if (client!.phone) t = t.split(client!.phone).join('[USUNIĘTO-TEL]');
-                if (client!.email) t = t.split(client!.email).join('[USUNIĘTO-EMAIL]');
-                if (client!.address) t = t.split(client!.address).join('[USUNIĘTO-ADRES]');
-                return t;
-              };
-              cleanedMsg = scrub(cleanedMsg);
-              cleanedMeta = metadataStr ? scrub(cleanedMeta) : metadataStr;
-              sqlDb.run('UPDATE sessions SET messages = ?, metadata = ? WHERE key = ?', [cleanedMsg, cleanedMeta || null, key]);
-              scrubbedSessionKeys.push(key);
-              deletedSessions++;
+        // Delete cases
+        sqlDb.run('DELETE FROM cases WHERE client_id = ?', [clientId]);
+        if (client) {
+          const allSessions = sqlDb.exec('SELECT key, messages, metadata FROM sessions');
+          if (allSessions.length) {
+            for (const row of allSessions[0].values) {
+              const key = row[0] as string;
+              const messagesStr = row[1] as string;
+              const metadataStr = (row[2] as string) ?? '';
+              const hasPii = messagesStr.includes(client.name) || metadataStr.includes(client.name)
+                || (client.pesel && (messagesStr.includes(client.pesel) || metadataStr.includes(client.pesel)))
+                || (client.address && (messagesStr.includes(client.address) || metadataStr.includes(client.address)));
+              if (hasPii) {
+                // Replace client PII in messages with [USUNIĘTO]
+                let cleanedMsg = messagesStr;
+                let cleanedMeta = metadataStr;
+                const scrub = (text: string) => {
+                  let t = text.split(client!.name).join('[USUNIĘTO-KLIENT]');
+                  if (client!.pesel) t = t.split(client!.pesel).join('[USUNIĘTO-PESEL]');
+                  if (client!.nip) t = t.split(client!.nip).join('[USUNIĘTO-NIP]');
+                  if (client!.phone) t = t.split(client!.phone).join('[USUNIĘTO-TEL]');
+                  if (client!.email) t = t.split(client!.email).join('[USUNIĘTO-EMAIL]');
+                  if (client!.address) t = t.split(client!.address).join('[USUNIĘTO-ADRES]');
+                  return t;
+                };
+                cleanedMsg = scrub(cleanedMsg);
+                cleanedMeta = metadataStr ? scrub(cleanedMeta) : metadataStr;
+                sqlDb.run('UPDATE sessions SET messages = ?, metadata = ? WHERE key = ?', [cleanedMsg, cleanedMeta || null, key]);
+                scrubbedSessionKeys.push(key);
+                deletedSessions++;
+              }
             }
           }
         }
-      }
 
-      // Delete the client record
-      sqlDb.run('DELETE FROM clients WHERE id = ?', [clientId]);
+        // Delete the client record
+        sqlDb.run('DELETE FROM clients WHERE id = ?', [clientId]);
+        sqlDb.run('COMMIT');
+      } catch (err) {
+        sqlDb.run('ROLLBACK');
+        throw err;
+      }
 
       scheduleSave();
       logger.info({ clientId, deletedCases: cases.length, deletedDocuments, scrubbedSessions: deletedSessions }, 'RODO: usunięto dane klienta');
