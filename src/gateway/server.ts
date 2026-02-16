@@ -484,7 +484,7 @@ export function createServer(config: Config, db: Database): HttpServer {
           return;
         }
 
-        // Cases API
+        // ===== Cases API =====
         if (pathname === '/api/cases' && req.method === 'GET') {
           const search = url.searchParams.get('search');
           let cases;
@@ -534,7 +534,12 @@ export function createServer(config: Config, db: Database): HttpServer {
           }
           if (req.method === 'PATCH') {
             readJsonBody(req, res, (data) => {
-              const updated = db.updateCase(caseId, data as any);
+              // Whitelist allowed fields (defense-in-depth — DB also whitelists)
+              const allowed: Record<string, unknown> = {};
+              for (const key of ['title', 'sygnatura', 'court', 'lawArea', 'status', 'description', 'opposingParty', 'opposingCounsel', 'valueOfDispute', 'notes', 'privacyMode']) {
+                if (data[key] !== undefined) allowed[key] = data[key];
+              }
+              const updated = db.updateCase(caseId, allowed as any);
               if (!updated) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Sprawa nie znaleziona' })); return; }
               res.writeHead(200, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify(updated));
@@ -587,6 +592,7 @@ export function createServer(config: Config, db: Database): HttpServer {
         }
         if (pathname.match(/^\/api\/deadlines\/[^/]+\/complete$/) && req.method === 'POST') {
           const dlId = decodeURIComponent(pathname.split('/')[3]);
+          if (!db.getDeadline(dlId)) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Termin nie znaleziony' })); return; }
           db.completeDeadline(dlId);
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: true }));
@@ -596,8 +602,7 @@ export function createServer(config: Config, db: Database): HttpServer {
         if (pathname.match(/^\/api\/deadlines\/[^/]+$/) && !pathname.endsWith('/complete')) {
           const dlId = decodeURIComponent(pathname.split('/')[3]);
           if (req.method === 'GET') {
-            const deadlines = db.listDeadlines({});
-            const dl = deadlines.find(d => d.id === dlId);
+            const dl = db.getDeadline(dlId);
             if (!dl) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Termin nie znaleziony' })); return; }
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify(dl));
@@ -605,12 +610,16 @@ export function createServer(config: Config, db: Database): HttpServer {
           }
           if (req.method === 'PATCH') {
             readJsonBody(req, res, (data) => {
+              const allowed: Record<string, unknown> = {};
+              for (const key of ['title', 'type', 'notes', 'reminderDaysBefore']) {
+                if (data[key] !== undefined) allowed[key] = data[key];
+              }
               if (data.date) {
                 const d = new Date(data.date as string);
                 if (isNaN(d.getTime())) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Nieprawidłowy format daty' })); return; }
-                data.date = d;
+                allowed.date = d;
               }
-              const updated = db.updateDeadline(dlId, data as any);
+              const updated = db.updateDeadline(dlId, allowed as any);
               if (!updated) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Termin nie znaleziony' })); return; }
               res.writeHead(200, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify(updated));
@@ -618,6 +627,7 @@ export function createServer(config: Config, db: Database): HttpServer {
             return;
           }
           if (req.method === 'DELETE') {
+            if (!db.getDeadline(dlId)) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Termin nie znaleziony' })); return; }
             db.deleteDeadline(dlId);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: true }));
@@ -667,7 +677,11 @@ export function createServer(config: Config, db: Database): HttpServer {
           }
           if (req.method === 'PATCH') {
             readJsonBody(req, res, (data) => {
-              const updated = db.updateClient(clientId, data as any);
+              const allowed: Record<string, unknown> = {};
+              for (const key of ['name', 'type', 'pesel', 'nip', 'regon', 'krs', 'email', 'phone', 'address', 'notes']) {
+                if (data[key] !== undefined) allowed[key] = data[key];
+              }
+              const updated = db.updateClient(clientId, allowed as any);
               if (!updated) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Klient nie znaleziony' })); return; }
               res.writeHead(200, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify(updated));
@@ -766,7 +780,15 @@ export function createServer(config: Config, db: Database): HttpServer {
           }
           if (req.method === 'PATCH') {
             readJsonBody(req, res, (data) => {
-              const updated = db.updateInvoice(invoiceId, data as any);
+              const allowed: Record<string, unknown> = {};
+              for (const key of ['status', 'amount', 'notes']) {
+                if (data[key] !== undefined) allowed[key] = data[key];
+              }
+              if (data.paidAt) {
+                const d = new Date(data.paidAt as string);
+                if (!isNaN(d.getTime())) allowed.paidAt = d;
+              }
+              const updated = db.updateInvoice(invoiceId, allowed as any);
               if (!updated) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Faktura nie znaleziona' })); return; }
               res.writeHead(200, { 'Content-Type': 'application/json' });
               res.end(JSON.stringify(updated));
@@ -837,6 +859,7 @@ export function createServer(config: Config, db: Database): HttpServer {
             return;
           }
           if (req.method === 'DELETE') {
+            if (!db.getTemplate(tmplId)) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Szablon nie znaleziony' })); return; }
             db.deleteTemplate(tmplId);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: true }));
@@ -844,7 +867,7 @@ export function createServer(config: Config, db: Database): HttpServer {
           }
         }
 
-        // ── Legal Calculators API (stateless, no auth required) ──
+        // ── Legal Calculators API (stateless, behind /api/ auth gate) ──
         if (pathname === '/api/calc/court-fee' && req.method === 'GET') {
           const amount = parseFloat(url.searchParams.get('amount') ?? '0');
           const caseType = url.searchParams.get('type') ?? 'cywilna';
@@ -924,13 +947,8 @@ export function createServer(config: Config, db: Database): HttpServer {
           return;
         }
 
-        // ── Privacy Status ──
+        // ── Privacy Status (auth checked at /api/ gate above) ──
         if (pathname === '/api/privacy/status' && req.method === 'GET') {
-          if (!checkApiAuth(req)) {
-            res.writeHead(401, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Unauthorized' }));
-            return;
-          }
           // Check if Ollama is reachable (async, use .then)
           const ollamaCheck = new Promise<boolean>((resolve) => {
             const controller = new AbortController();
@@ -954,13 +972,8 @@ export function createServer(config: Config, db: Database): HttpServer {
           return;
         }
 
-        // ── Privacy PII Check (POST) ──
+        // ── Privacy PII Check (POST, auth checked at /api/ gate above) ──
         if (pathname === '/api/privacy/check' && req.method === 'POST') {
-          if (!checkApiAuth(req)) {
-            res.writeHead(401, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Unauthorized' }));
-            return;
-          }
           readJsonBody(req, res, (data) => {
             const text = String(data.text ?? '').slice(0, 100_000);
             const result = detectPii(text);
@@ -976,13 +989,8 @@ export function createServer(config: Config, db: Database): HttpServer {
           return;
         }
 
-        // ── Privacy Audit Log ──
+        // ── Privacy Audit Log (auth checked at /api/ gate above) ──
         if (pathname === '/api/privacy/audit' && req.method === 'GET') {
-          if (!checkApiAuth(req)) {
-            res.writeHead(401, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Unauthorized' }));
-            return;
-          }
           const limit = Math.max(1, Math.min(parseInt(url.searchParams.get('limit') ?? '50', 10) || 50, 500));
           const action = url.searchParams.get('action') ?? undefined;
           const since = url.searchParams.get('since') ? parseInt(url.searchParams.get('since')!, 10) : undefined;
@@ -1032,7 +1040,16 @@ export function createServer(config: Config, db: Database): HttpServer {
         }
       }, WS_PING_INTERVAL);
 
+      const MAX_WS_CONNECTIONS = 500;
+
       wss.on('connection', (ws) => {
+        // Reject if at capacity
+        if (clients.size >= MAX_WS_CONNECTIONS) {
+          logger.warn({ current: clients.size }, 'WebSocket connection rejected — at capacity');
+          ws.close(4002, 'Server at capacity');
+          return;
+        }
+
         const chatId = generateId('webchat');
         let authenticated = !requireAuth; // auto-auth if no token configured
         let msgCount = 0;

@@ -164,7 +164,7 @@ Bądź konkretny, profesjonalny i pomocny. Jeśli czegoś nie wiesz, powiedz to 
 function buildSystemPrompt(session: Session, db: Database): string {
   let prompt = SYSTEM_PROMPT;
 
-  const activeCaseId = session.metadata?.activeCaseId as string | undefined;
+  const activeCaseId = typeof session.metadata?.activeCaseId === 'string' ? session.metadata.activeCaseId : undefined;
   if (activeCaseId) {
     const activeCase = db.getCase(activeCaseId);
     if (activeCase) {
@@ -196,7 +196,7 @@ function buildSystemPrompt(session: Session, db: Database): string {
 
 /** Resolve caseId from tool input, falling back to session's active case */
 function resolveCaseId(input: Record<string, unknown>, session: Session): string | undefined {
-  return (input.caseId as string | undefined) ?? (session.metadata?.activeCaseId as string | undefined);
+  return (typeof input.caseId === 'string' ? input.caseId : undefined) ?? (typeof session.metadata?.activeCaseId === 'string' ? session.metadata.activeCaseId : undefined);
 }
 
 // =============================================================================
@@ -2083,7 +2083,7 @@ function classifyPrivacy(
   let hasPii = msgResult.hasPii || msgResult.hasSensitiveKeywords;
 
   // Active case context = always sensitive (contains client name, case details)
-  const activeCaseId = session.metadata?.activeCaseId as string | undefined;
+  const activeCaseId = typeof session.metadata?.activeCaseId === 'string' ? session.metadata.activeCaseId : undefined;
   if (activeCaseId) {
     const activeCase = db.getCase(activeCaseId);
     if (activeCase) {
@@ -2149,7 +2149,7 @@ export function createAgent(config: Config, db: Database): Agent {
     async handleMessage(text: string, session: Session): Promise<string | null> {
       // --- Privacy-aware routing ---
       const privacy = classifyPrivacy(text, session, config, db);
-      const activeCaseId = session.metadata?.activeCaseId as string | undefined;
+      const activeCaseId = typeof session.metadata?.activeCaseId === 'string' ? session.metadata.activeCaseId : undefined;
       const piiResult = detectPii(text);
 
       if (privacy.decision === 'local' || privacy.decision === 'refuse') {
@@ -2215,7 +2215,7 @@ export function createAgent(config: Config, db: Database): Agent {
       // If using Anthropic as primary, skip Ollama
       if (config.agent.provider === 'anthropic' && config.agent.anthropicKey) {
         logPrivacyEvent({ action: 'route_cloud', sessionKey: session.key, userId: session.userId, caseId: activeCaseId, reason: privacy.reason, piiMatchCount: piiResult.matches.length, piiTypes: [...new Set(piiResult.matches.map(m => m.type))], privacyMode: (session.metadata?.privacyMode as string) ?? config.privacy.mode, provider: 'anthropic' });
-        return handleWithAnthropic(text, session, config, db, piiDetectedForCloud);
+        return await handleWithAnthropic(text, session, config, db, piiDetectedForCloud);
       }
 
       // Check speed model availability once
@@ -2252,7 +2252,7 @@ export function createAgent(config: Config, db: Database): Agent {
             if (config.agent.anthropicKey) {
               logger.warn({ err: retryMsg }, 'Ollama niedostępna — przełączam na Anthropic');
               logPrivacyEvent({ action: 'route_cloud', sessionKey: session.key, userId: session.userId, caseId: activeCaseId, reason: 'ollama_fallback', piiMatchCount: piiResult.matches.length, piiTypes: [...new Set(piiResult.matches.map(m => m.type))], privacyMode: (session.metadata?.privacyMode as string) ?? config.privacy.mode, provider: 'anthropic' });
-              return handleWithAnthropic(text, session, config, db, piiDetectedForCloud);
+              return await handleWithAnthropic(text, session, config, db, piiDetectedForCloud);
             }
             throw retryErr;
           }
@@ -2261,7 +2261,7 @@ export function createAgent(config: Config, db: Database): Agent {
         if (isOllamaDown && config.agent.anthropicKey) {
           logger.warn({ err: msg }, 'Ollama niedostępna — przełączam na Anthropic');
           logPrivacyEvent({ action: 'route_cloud', sessionKey: session.key, userId: session.userId, caseId: activeCaseId, reason: 'ollama_down_fallback', piiMatchCount: piiResult.matches.length, piiTypes: [...new Set(piiResult.matches.map(m => m.type))], privacyMode: (session.metadata?.privacyMode as string) ?? config.privacy.mode, provider: 'anthropic' });
-          return handleWithAnthropic(text, session, config, db, piiDetectedForCloud);
+          return await handleWithAnthropic(text, session, config, db, piiDetectedForCloud);
         }
         throw err;
       }
@@ -2283,7 +2283,7 @@ async function handleWithAnthropic(
   // --- Network isolation: strict mode blocks ALL cloud calls ---
   const effectivePrivacyMode = (session.metadata?.privacyMode as string) ?? config.privacy.mode;
   // Also check active case's privacy mode as defense-in-depth
-  const activeCaseId = session.metadata?.activeCaseId as string | undefined;
+  const activeCaseId = typeof session.metadata?.activeCaseId === 'string' ? session.metadata.activeCaseId : undefined;
   if (activeCaseId) {
     const activeCase = db.getCase(activeCaseId);
     if (activeCase?.privacyMode === 'strict') {
@@ -2536,6 +2536,7 @@ async function callOllama(
     }
     throw new Error(`Nie można połączyć się z Ollama (${baseUrl}): ${err?.message ?? 'nieznany błąd'}`);
   }
+  clearTimeout(timeout);
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => '');
