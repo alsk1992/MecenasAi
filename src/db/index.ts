@@ -744,11 +744,31 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
 
     deleteClient(id: string) {
       // Cascade: remove linked cases (which cascades to documents, deadlines, time entries)
+      // Single transaction for atomicity — avoid partial deletion leaving orphans
       const cases = this.listCases({ clientId: id });
-      for (const c of cases) {
-        this.deleteCase(c.id);
+      sqlDb.run('BEGIN');
+      try {
+        for (const c of cases) {
+          // Inline case deletion (deleteCase has its own BEGIN/COMMIT which would conflict)
+          const docs = sqlDb.exec('SELECT id FROM documents WHERE case_id = ?', [c.id]);
+          if (docs.length) {
+            for (const row of docs[0].values) {
+              sqlDb.run("DELETE FROM embeddings WHERE source_type = 'document' AND source_id = ?", [row[0] as string]);
+            }
+          }
+          sqlDb.run('DELETE FROM documents WHERE case_id = ?', [c.id]);
+          sqlDb.run('DELETE FROM deadlines WHERE case_id = ?', [c.id]);
+          sqlDb.run('DELETE FROM time_entries WHERE case_id = ?', [c.id]);
+          sqlDb.run('DELETE FROM ai_consent WHERE case_id = ?', [c.id]);
+          sqlDb.run('DELETE FROM cases WHERE id = ?', [c.id]);
+        }
+        sqlDb.run('DELETE FROM invoices WHERE client_id = ?', [id]);
+        sqlDb.run('DELETE FROM clients WHERE id = ?', [id]);
+        sqlDb.run('COMMIT');
+      } catch (err) {
+        sqlDb.run('ROLLBACK');
+        throw err;
       }
-      sqlDb.run('DELETE FROM clients WHERE id = ?', [id]);
       scheduleSave();
     },
 
@@ -978,8 +998,15 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
     },
 
     deleteDocument(id: string) {
-      sqlDb.run("DELETE FROM embeddings WHERE source_type = 'document' AND source_id = ?", [id]);
-      sqlDb.run('DELETE FROM documents WHERE id = ?', [id]);
+      sqlDb.run('BEGIN');
+      try {
+        sqlDb.run("DELETE FROM embeddings WHERE source_type = 'document' AND source_id = ?", [id]);
+        sqlDb.run('DELETE FROM documents WHERE id = ?', [id]);
+        sqlDb.run('COMMIT');
+      } catch (err) {
+        sqlDb.run('ROLLBACK');
+        throw err;
+      }
       scheduleSave();
     },
 
@@ -1324,13 +1351,18 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
       const v = rows[0].values[0];
       const buf = v[1] as Uint8Array;
       if (buf.byteLength % 4 !== 0) return null;
-      return { id: v[0] as string, vector: new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4) };
+      // Copy the buffer to avoid sharing sql.js Emscripten heap memory
+      const copy = new Uint8Array(buf).buffer;
+      return { id: v[0] as string, vector: new Float32Array(copy) };
     },
 
     findSimilarEmbeddings(vector, sourceType, limit = 10) {
+      // Cap the scan to prevent loading unbounded embeddings into memory.
+      // For exact nearest-neighbor over larger sets, use a vector DB instead.
+      const MAX_SCAN = 5000;
       const rows = sqlDb.exec(
-        'SELECT id, source_id, vector FROM embeddings WHERE source_type = ?',
-        [sourceType]
+        'SELECT id, source_id, vector FROM embeddings WHERE source_type = ? LIMIT ?',
+        [sourceType, MAX_SCAN]
       );
       if (!rows.length) return [];
 
@@ -1338,7 +1370,8 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
       for (const row of rows[0].values) {
         const buf = row[2] as Uint8Array;
         if (buf.byteLength % 4 !== 0) continue;
-        const stored = new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
+        // Copy the buffer to avoid sharing sql.js Emscripten heap memory
+        const stored = new Float32Array(new Uint8Array(buf).buffer);
         const sim = cosineSimilarity(vector, stored);
         results.push({ id: row[0] as string, sourceId: row[1] as string, similarity: sim });
       }
@@ -1458,9 +1491,9 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
               const key = row[0] as string;
               const messagesStr = row[1] as string;
               const metadataStr = (row[2] as string) ?? '';
-              const hasPii = messagesStr.includes(client.name) || metadataStr.includes(client.name)
-                || (client.pesel && (messagesStr.includes(client.pesel) || metadataStr.includes(client.pesel)))
-                || (client.address && (messagesStr.includes(client.address) || metadataStr.includes(client.address)));
+              // Check ALL client PII fields to avoid missing sessions that only contain NIP/phone/etc.
+              const piiFields = [client.name, client.pesel, client.nip, client.regon, client.krs, client.email, client.phone, client.address].filter(Boolean) as string[];
+              const hasPii = piiFields.some(field => messagesStr.includes(field) || metadataStr.includes(field));
               if (hasPii) {
                 // Replace client PII in messages with [USUNIĘTO]
                 let cleanedMsg = messagesStr;
@@ -1469,6 +1502,8 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
                   let t = text.split(client!.name).join('[USUNIĘTO-KLIENT]');
                   if (client!.pesel) t = t.split(client!.pesel).join('[USUNIĘTO-PESEL]');
                   if (client!.nip) t = t.split(client!.nip).join('[USUNIĘTO-NIP]');
+                  if (client!.regon) t = t.split(client!.regon).join('[USUNIĘTO-REGON]');
+                  if (client!.krs) t = t.split(client!.krs).join('[USUNIĘTO-KRS]');
                   if (client!.phone) t = t.split(client!.phone).join('[USUNIĘTO-TEL]');
                   if (client!.email) t = t.split(client!.email).join('[USUNIĘTO-EMAIL]');
                   if (client!.address) t = t.split(client!.address).join('[USUNIĘTO-ADRES]');

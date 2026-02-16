@@ -311,10 +311,16 @@ export function containsSensitiveData(text: string): boolean {
   }
 
   // Quick regex checks (most common patterns, test-only for early exit)
-  if (PESEL_RE.test(text)) { PESEL_RE.lastIndex = 0; return true; }
-  PESEL_RE.lastIndex = 0;
-  if (NIP_RE.test(text)) { NIP_RE.lastIndex = 0; return true; }
-  NIP_RE.lastIndex = 0;
+  // For PESEL/NIP/REGON: validate checksums to avoid false positives on arbitrary digit strings
+  for (const m of text.matchAll(PESEL_RE)) {
+    if (isValidPesel(m[1])) return true;
+  }
+  for (const m of text.matchAll(NIP_RE)) {
+    if (isValidNip(m[1])) return true;
+  }
+  for (const m of text.matchAll(REGON_RE)) {
+    if (isValidRegon(m[1])) return true;
+  }
   if (PHONE_RE.test(text)) { PHONE_RE.lastIndex = 0; return true; }
   PHONE_RE.lastIndex = 0;
   if (EMAIL_RE.test(text)) { EMAIL_RE.lastIndex = 0; return true; }
@@ -327,8 +333,6 @@ export function containsSensitiveData(text: string): boolean {
   ID_CARD_RE.lastIndex = 0;
   if (PASSPORT_RE.test(text)) { PASSPORT_RE.lastIndex = 0; return true; }
   PASSPORT_RE.lastIndex = 0;
-  if (REGON_RE.test(text)) { REGON_RE.lastIndex = 0; return true; }
-  REGON_RE.lastIndex = 0;
   if (POSTAL_CODE_RE.test(text)) { POSTAL_CODE_RE.lastIndex = 0; return true; }
   POSTAL_CODE_RE.lastIndex = 0;
   if (CASE_SIGNATURE_RE.test(text)) { CASE_SIGNATURE_RE.lastIndex = 0; return true; }

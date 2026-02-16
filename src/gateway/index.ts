@@ -24,8 +24,22 @@ export async function createGateway(config: Config): Promise<AppGateway> {
   // Initialize database
   const db = await initDatabase();
 
-  // Simple session management
+  // Simple session management with bounded cache
+  const MAX_SESSION_CACHE = 2000;
   const sessions = new Map<string, Session>();
+
+  /** Evict oldest entries from session cache if over capacity */
+  function evictSessionCache(): void {
+    if (sessions.size <= MAX_SESSION_CACHE) return;
+    // Map iteration order is insertion order; evict first (oldest) entries
+    const toEvict = sessions.size - MAX_SESSION_CACHE;
+    let evicted = 0;
+    for (const key of sessions.keys()) {
+      if (evicted >= toEvict) break;
+      sessions.delete(key);
+      evicted++;
+    }
+  }
 
   function getOrCreateSession(message: IncomingMessage): Session {
     const key = `${message.platform}:${message.chatId}`;
@@ -50,6 +64,7 @@ export async function createGateway(config: Config): Promise<AppGateway> {
         db.upsertSession(session);
         sessions.set(key, session);
       }
+      evictSessionCache();
     }
     return session;
   }
@@ -158,28 +173,28 @@ export async function createGateway(config: Config): Promise<AppGateway> {
       }
     } catch (err) {
       const errMsg = (err as Error).message;
+      let errorResponse: string;
       if (errMsg === 'TIMEOUT') {
         logger.warn({ chatId: message.chatId }, 'Agent response timed out');
-        await sendMessage({
-          platform: message.platform,
-          chatId: message.chatId,
-          text: 'Przepraszam, generowanie odpowiedzi trwalo zbyt dlugo. Sprobuj ponownie z prostszym pytaniem.',
-        });
+        errorResponse = 'Przepraszam, generowanie odpowiedzi trwalo zbyt dlugo. Sprobuj ponownie z prostszym pytaniem.';
       } else if (errMsg === 'CANCELLED') {
         logger.info({ chatId: message.chatId }, 'Agent response cancelled by user');
-        await sendMessage({
-          platform: message.platform,
-          chatId: message.chatId,
-          text: 'Generowanie odpowiedzi anulowane.',
-        });
+        errorResponse = 'Generowanie odpowiedzi anulowane.';
       } else {
         logger.error({ err }, 'Error handling message');
-        await sendMessage({
-          platform: message.platform,
-          chatId: message.chatId,
-          text: 'Przepraszam, wystapil blad. Prosze sprobowac ponownie.',
-        });
+        errorResponse = 'Przepraszam, wystapil blad. Prosze sprobowac ponownie.';
       }
+      // Record error response in session so history stays consistent (user msg + assistant msg pairs)
+      session.messages.push({
+        role: 'assistant',
+        content: errorResponse,
+        timestamp: new Date(),
+      });
+      await sendMessage({
+        platform: message.platform,
+        chatId: message.chatId,
+        text: errorResponse,
+      });
     } finally {
       pendingRequests.delete(message.chatId);
     }
@@ -214,11 +229,16 @@ export async function createGateway(config: Config): Promise<AppGateway> {
           telegramBot = new Bot(config.channels.telegram.token);
           const allowedUsers = config.channels.telegram.allowedUsers;
 
+          // Global error handler for grammy — prevents unhandled rejections from polling errors
+          telegramBot.catch((err: unknown) => {
+            logger.error({ err }, 'Telegram bot error');
+          });
+
           // Auth middleware
           function checkTgAuth(ctx: any): boolean {
             const userId = String(ctx.from?.id);
             if (allowedUsers?.length && !allowedUsers.includes(userId)) {
-              ctx.reply('Brak dostepu. Skontaktuj sie z administratorem.');
+              ctx.reply('Brak dostepu. Skontaktuj sie z administratorem.').catch(() => {});
               return false;
             }
             return true;
@@ -644,7 +664,10 @@ export async function createGateway(config: Config): Promise<AppGateway> {
             }
           });
 
-          telegramBot.start();
+          telegramBot.start({
+            onStart: () => logger.info('Telegram bot polling started'),
+          });
+          // Note: Bot.start() is long-running (polling loop) — do not await.
           if (!allowedUsers?.length) {
             logger.warn('Telegram bot started WITHOUT allowedUsers — ALL Telegram users have access! Set TELEGRAM_ALLOWED_USERS to restrict.');
           }

@@ -77,10 +77,13 @@ export function createServer(config: Config, db: Database): HttpServer {
   function readJsonBody(req: http.IncomingMessage, res: http.ServerResponse, cb: (data: Record<string, unknown>) => void): void {
     let body = '';
     let size = 0;
+    let aborted = false;
     const MAX = 1_048_576;
     req.on('data', (chunk) => {
+      if (aborted) return;
       size += chunk.length;
       if (size > MAX) {
+        aborted = true;
         if (!res.headersSent) { res.writeHead(413, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Treść zbyt duża (max 1 MB).' })); }
         req.destroy();
         return;
@@ -140,6 +143,7 @@ export function createServer(config: Config, db: Database): HttpServer {
           res.setHeader('Access-Control-Allow-Origin', '*');
         } else if (origin && corsOrigins.includes(origin)) {
           res.setHeader('Access-Control-Allow-Origin', origin);
+          res.setHeader('Vary', 'Origin');
         }
         res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
         res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
@@ -486,6 +490,7 @@ export function createServer(config: Config, db: Database): HttpServer {
             return;
           }
           generateDocx(doc, db).then((buffer) => {
+            if (res.headersSent) return;
             const filename = `${doc.title.replace(/[^a-zA-Z0-9ąćęłńóśźżĄĆĘŁŃÓŚŹŻ\s_-]/g, '').replace(/[\r\n\0"]/g, '').trim().replace(/\s+/g, '_').slice(0, 200)}.docx`;
             res.writeHead(200, {
               'Content-Type': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -495,8 +500,10 @@ export function createServer(config: Config, db: Database): HttpServer {
             res.end(buffer);
           }).catch((err) => {
             logger.error({ err, docId: id }, 'DOCX export failed');
-            res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Błąd generowania DOCX' }));
+            if (!res.headersSent) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Błąd generowania DOCX' }));
+            }
           });
           return;
         }
@@ -816,8 +823,18 @@ export function createServer(config: Config, db: Database): HttpServer {
           if (req.method === 'PATCH') {
             readJsonBody(req, res, (data) => {
               const allowed: Record<string, unknown> = {};
-              for (const key of ['status', 'amount', 'notes']) {
+              for (const key of ['status', 'notes']) {
                 if (data[key] !== undefined) allowed[key] = data[key];
+              }
+              // Validate amount if provided
+              if (data.amount !== undefined) {
+                const amt = Number(data.amount);
+                if (!Number.isFinite(amt) || amt < 0) {
+                  res.writeHead(400, { 'Content-Type': 'application/json' });
+                  res.end(JSON.stringify({ error: 'Kwota musi być liczbą >= 0' }));
+                  return;
+                }
+                allowed.amount = amt;
               }
               if (data.paidAt) {
                 const d = new Date(data.paidAt as string);
@@ -1003,6 +1020,12 @@ export function createServer(config: Config, db: Database): HttpServer {
               ollamaAvailable: ollamaUp,
               anthropicConfigured: !!config.agent.anthropicKey,
             }));
+          }).catch((err) => {
+            logger.warn({ err }, 'Privacy status handler error');
+            if (!res.headersSent) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Błąd sprawdzania statusu prywatności' }));
+            }
           });
           return;
         }
@@ -1088,7 +1111,10 @@ export function createServer(config: Config, db: Database): HttpServer {
         const chatId = generateId('webchat');
         let authenticated = !requireAuth; // auto-auth if no token configured
         let msgCount = 0;
+        let msgIdCounter = 0; // separate counter for message IDs (not shared with rate limiter)
         let rateLimitResetAt = Date.now() + 60_000;
+        // Serialize message processing to prevent concurrent handleMessage on the same session
+        let messageQueue: Promise<void> = Promise.resolve();
         (ws as any)._mecenasAlive = true;
 
         ws.on('pong', () => { (ws as any)._mecenasAlive = true; });
@@ -1216,16 +1242,23 @@ export function createServer(config: Config, db: Database): HttpServer {
               const wsText = msg.text.length > 50000 ? msg.text.slice(0, 50000) : msg.text;
               // Pass per-connection privacy mode in message metadata
               const privacyMode = (ws as any)._privacyMode as string | undefined;
-              await callbacks.onWebChatMessage({
-                id: `wc_${Date.now()}_${++msgCount}`,
+              const incomingMsg = {
+                id: `wc_${Date.now()}_${++msgIdCounter}`,
                 platform: 'webchat',
                 userId: chatId,
                 chatId,
-                chatType: 'dm',
+                chatType: 'dm' as const,
                 text: wsText,
                 timestamp: new Date(),
                 metadata: privacyMode ? { privacyMode } : undefined,
+              };
+              // Serialize message processing to prevent concurrent mutations on the same session
+              messageQueue = messageQueue.then(() =>
+                callbacks.onWebChatMessage(incomingMsg)
+              ).catch((err) => {
+                logger.warn({ err, chatId }, 'Queued WebChat message handler failed');
               });
+              await messageQueue;
             }
           } catch (err) {
             logger.warn({ err }, 'Invalid WebChat message');
@@ -1240,6 +1273,7 @@ export function createServer(config: Config, db: Database): HttpServer {
         ws.on('error', (err) => {
           logger.warn({ err, chatId }, 'WebChat error');
           clients.delete(chatId);
+          if (authTimeout) { clearTimeout(authTimeout); authTimeout = null; }
         });
       });
 
@@ -1303,7 +1337,15 @@ export function createServer(config: Config, db: Database): HttpServer {
 
       return new Promise<void>((resolve) => {
         if (server) {
+          // Force-close idle keep-alive connections after server.close()
           server.close(() => resolve());
+          // closeAllConnections() was added in Node 18.2 — destroys all active connections
+          if (typeof (server as any).closeAllConnections === 'function') {
+            // Give in-flight requests 5 seconds to finish, then force-close
+            setTimeout(() => {
+              try { (server as any).closeAllConnections(); } catch {}
+            }, 5_000);
+          }
         } else {
           resolve();
         }

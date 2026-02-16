@@ -867,6 +867,7 @@ const VALID_CLIENT_TYPES = ['osoba_fizyczna', 'osoba_prawna'] as const;
 const VALID_LAW_AREAS = ['cywilne', 'karne', 'administracyjne', 'pracy', 'rodzinne', 'gospodarcze', 'podatkowe', 'egzekucyjne', 'inne'] as const;
 const VALID_DEADLINE_TYPES = ['procesowy', 'ustawowy', 'umowny', 'wewnetrzny'] as const;
 const VALID_DOC_TYPES = ['pozew', 'odpowiedz_na_pozew', 'apelacja', 'zarzuty', 'sprzeciw', 'wezwanie_do_zaplaty', 'wniosek', 'pismo_procesowe', 'umowa', 'opinia_prawna', 'notatka', 'inne'] as const;
+const VALID_CASE_STATUSES = ['nowa', 'w_toku', 'oczekuje_na_termin', 'oczekuje_na_dokument', 'zawieszona', 'zamknieta', 'wygrana', 'przegrana', 'ugoda'] as const;
 
 // =============================================================================
 // TOOL EXECUTION
@@ -959,7 +960,11 @@ async function executeTool(name: string, input: Record<string, unknown>, db: Dat
         const updateCaseId = requireString(input, 'id');
         if (!updateCaseId) return JSON.stringify({ error: 'ID sprawy jest wymagane.' });
         const updates: Record<string, unknown> = {};
-        if (input.status !== undefined) updates.status = optString(input, 'status');
+        if (input.status !== undefined) {
+          const s = optString(input, 'status');
+          if (s && !VALID_CASE_STATUSES.includes(s as any)) return JSON.stringify({ error: `Status musi być: ${VALID_CASE_STATUSES.join(', ')}` });
+          updates.status = s;
+        }
         if (input.sygnatura !== undefined) updates.sygnatura = optString(input, 'sygnatura');
         if (input.court !== undefined) updates.court = optString(input, 'court');
         if (input.notes !== undefined) updates.notes = optString(input, 'notes');
@@ -1536,7 +1541,7 @@ async function executeTool(name: string, input: Record<string, unknown>, db: Dat
         // Detect query type
         const cleanQuery = companyQuery.replace(/[-\s]/g, '');
         const isNip = /^\d{10}$/.test(cleanQuery);
-        const isKrs = /^\d{10}$/.test(cleanQuery) || /^\d{1,10}$/.test(cleanQuery);
+        const isKrs = /^\d{10}$/.test(cleanQuery);
 
         // KRS lookup via api.dane.gov.pl/1.4/resources/50410,50411/data
         const shouldSearchKrs = registry === 'krs' || registry === 'auto';
@@ -1544,18 +1549,9 @@ async function executeTool(name: string, input: Record<string, unknown>, db: Dat
 
         if (shouldSearchKrs) {
           try {
-            const krsParams = new URLSearchParams();
-            if (isNip) {
-              krsParams.set('q', cleanQuery);
-            } else {
-              krsParams.set('q', companyQuery.slice(0, 200));
-            }
-            krsParams.set('page', '1');
-            krsParams.set('per_page', '3');
-
             const controller = new AbortController();
             const timeout = setTimeout(() => controller.abort(), 10_000);
-            const resp = await fetch(`https://api-krs.ms.gov.pl/api/krs/OdpisPelny/${isKrs && /^\d{10}$/.test(cleanQuery) ? cleanQuery : ''}?rejestr=P&format=json`, {
+            const resp = await fetch(`https://api-krs.ms.gov.pl/api/krs/OdpisPelny/${isKrs ? cleanQuery : ''}?rejestr=P&format=json`, {
               headers: { 'Accept': 'application/json' },
               signal: controller.signal,
             }).catch(() => null);
@@ -1787,9 +1783,8 @@ async function executeTool(name: string, input: Record<string, unknown>, db: Dat
         const udUpdates: Record<string, unknown> = {};
         if (input.title !== undefined) udUpdates.title = optString(input, 'title');
         if (input.content !== undefined) {
-          const udContent = optString(input, 'content', 100000);
-          if (udContent && udContent.length > 100000) return JSON.stringify({ error: 'Treść za długa (maks. 100 000 znaków).' });
-          udUpdates.content = udContent;
+          if (typeof input.content === 'string' && input.content.length > 100000) return JSON.stringify({ error: 'Treść za długa (maks. 100 000 znaków).' });
+          udUpdates.content = optString(input, 'content', 100000);
         }
         if (input.notes !== undefined) udUpdates.notes = optString(input, 'notes');
         const updatedDoc = db.updateDocument(udId, udUpdates as any);
@@ -1799,6 +1794,7 @@ async function executeTool(name: string, input: Record<string, unknown>, db: Dat
       case 'complete_deadline': {
         const cdId = requireString(input, 'id');
         if (!cdId) return JSON.stringify({ error: 'ID terminu jest wymagane.' });
+        if (!db.getDeadline(cdId)) return JSON.stringify({ error: 'Termin nie znaleziony.' });
         db.completeDeadline(cdId);
         return JSON.stringify({ success: true, message: 'Termin oznaczony jako wykonany.' });
       }
@@ -1898,6 +1894,7 @@ async function executeTool(name: string, input: Record<string, unknown>, db: Dat
       case 'delete_deadline': {
         const delDlId = requireString(input, 'id');
         if (!delDlId) return JSON.stringify({ error: 'ID terminu jest wymagane.' });
+        if (!db.getDeadline(delDlId)) return JSON.stringify({ error: 'Termin nie znaleziony.' });
         db.deleteDeadline(delDlId);
         return JSON.stringify({ success: true, message: 'Termin usunięty.' });
       }
@@ -1919,6 +1916,14 @@ async function executeTool(name: string, input: Record<string, unknown>, db: Dat
         const dcId = requireString(input, 'id');
         if (!dcId) return JSON.stringify({ error: 'ID klienta jest wymagane.' });
         if (!db.getClient(dcId)) return JSON.stringify({ error: 'Klient nie znaleziony.' });
+        // Clear active case if it belongs to this client
+        const activeId = session.metadata?.activeCaseId;
+        if (typeof activeId === 'string') {
+          const activeCase = db.getCase(activeId);
+          if (activeCase && activeCase.clientId === dcId) {
+            delete session.metadata!.activeCaseId;
+          }
+        }
         db.deleteClient(dcId);
         return JSON.stringify({ success: true, message: 'Klient i powiązane dane usunięte.' });
       }
@@ -1927,6 +1932,10 @@ async function executeTool(name: string, input: Record<string, unknown>, db: Dat
         if (!delCaseId) return JSON.stringify({ error: 'ID sprawy jest wymagane.' });
         if (!db.getCase(delCaseId)) return JSON.stringify({ error: 'Sprawa nie znaleziona.' });
         db.deleteCase(delCaseId);
+        // Clear active case if it was the deleted one
+        if (session.metadata?.activeCaseId === delCaseId) {
+          delete session.metadata.activeCaseId;
+        }
         return JSON.stringify({ success: true, message: 'Sprawa i powiązane dane usunięte.' });
       }
       // ── Privacy & Compliance Tools ──
@@ -1934,7 +1943,10 @@ async function executeTool(name: string, input: Record<string, unknown>, db: Dat
         const conCaseId = resolveCaseId(input, session);
         if (!conCaseId) return JSON.stringify({ error: 'ID sprawy jest wymagane.' });
         if (!db.getCase(conCaseId)) return JSON.stringify({ error: 'Sprawa nie znaleziona.' });
-        const scope = optString(input, 'scope') ?? 'local_only';
+        const VALID_CONSENT_SCOPES = ['local_only', 'cloud_anonymized', 'full'] as const;
+        const rawScope = optString(input, 'scope') ?? 'local_only';
+        if (!VALID_CONSENT_SCOPES.includes(rawScope as any)) return JSON.stringify({ error: `Zakres zgody musi być: ${VALID_CONSENT_SCOPES.join(', ')}` });
+        const scope = rawScope;
         const notes = optString(input, 'notes');
         const consent = db.recordAiConsent(conCaseId, session.userId, scope, notes ?? undefined);
         logPrivacyEvent({ action: 'consent_record', sessionKey: session.key, userId: session.userId, caseId: conCaseId, reason: `scope=${scope}` });
@@ -1963,7 +1975,7 @@ async function executeTool(name: string, input: Record<string, unknown>, db: Dat
         const client = db.getClient(gdprClientId);
         if (!client) return JSON.stringify({ error: 'Klient nie znaleziony.' });
         const result = db.gdprDeleteClient(gdprClientId);
-        logPrivacyEvent({ action: 'gdpr_delete', sessionKey: session.key, userId: session.userId, reason: `client_deleted`, privacyMode: (session.metadata?.privacyMode as string) ?? 'auto' });
+        logPrivacyEvent({ action: 'gdpr_delete', sessionKey: session.key, userId: session.userId, reason: `client_deleted:${gdprClientId}`, privacyMode: (session.metadata?.privacyMode as string) ?? 'auto' });
         return JSON.stringify({ success: true, ...result, message: `Dane klienta trwale usunięte (Art. 17 RODO). Usunięto ${result.deletedCases} spraw, ${result.deletedDocuments} dokumentów, oczyszczono ${result.scrubbedSessions} sesji.` });
       }
       case 'set_case_privacy': {
@@ -1981,8 +1993,7 @@ async function executeTool(name: string, input: Record<string, unknown>, db: Dat
     }
   } catch (err) {
     logger.error({ err, tool: name }, 'Tool execution error');
-    const msg = err instanceof Error ? err.message.slice(0, 100) : 'unknown';
-    return JSON.stringify({ error: `Błąd wykonania narzędzia ${name}: ${msg}` });
+    return JSON.stringify({ error: `Wewnętrzny błąd narzędzia ${name}. Spróbuj ponownie lub użyj innego podejścia.` });
   }
 }
 
@@ -2503,6 +2514,11 @@ Jeśli nie musisz używać narzędzia, odpowiedz normalnym tekstem.`;
 
     conversationHistory.push({ role: 'assistant', content: response });
     conversationHistory.push({ role: 'user', content: `Wynik narzędzia ${toolCall.tool}:\n${result}\n\nTeraz odpowiedz użytkownikowi na podstawie wyniku narzędzia.` });
+
+    // Cap conversation history to prevent Ollama context overflow in long tool loops
+    if (conversationHistory.length > 40) {
+      conversationHistory.splice(0, conversationHistory.length - 40);
+    }
 
     response = await callOllama(ollamaUrl, model, systemWithTools, conversationHistory, config.agent.temperature, config.agent.maxTokens);
   }

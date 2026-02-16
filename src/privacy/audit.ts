@@ -135,19 +135,25 @@ export function queryAuditLog(filters?: {
   try {
     const rows = _sqlDb.exec(sql, params);
     if (!rows.length) return [];
-    return rows[0].values.map(v => ({
-      action: v[1] as PrivacyAction,
-      sessionKey: v[2] as string | undefined,
-      userId: v[3] as string | undefined,
-      caseId: v[4] as string | undefined,
-      reason: v[5] as string,
-      piiMatchCount: v[6] as number | undefined,
-      piiTypes: v[7] ? JSON.parse(v[7] as string) : undefined,
-      anonymizationCount: v[8] as number | undefined,
-      privacyMode: v[9] as string | undefined,
-      provider: v[10] as string | undefined,
-      timestamp: v[11] as number,
-    }));
+    return rows[0].values.map(v => {
+      let piiTypes: string[] | undefined;
+      if (v[7]) {
+        try { piiTypes = JSON.parse(v[7] as string); } catch { piiTypes = undefined; }
+      }
+      return {
+        action: v[1] as PrivacyAction,
+        sessionKey: v[2] as string | undefined,
+        userId: v[3] as string | undefined,
+        caseId: v[4] as string | undefined,
+        reason: v[5] as string,
+        piiMatchCount: v[6] as number | undefined,
+        piiTypes,
+        anonymizationCount: v[8] as number | undefined,
+        privacyMode: v[9] as string | undefined,
+        provider: v[10] as string | undefined,
+        timestamp: v[11] as number,
+      };
+    });
   } catch (err) {
     logger.warn({ err }, 'Błąd zapytania do logu prywatności');
     return [];
