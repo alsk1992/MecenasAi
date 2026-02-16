@@ -10,6 +10,7 @@ import { logger } from '../utils/logger.js';
 import { resolveStateDir } from '../config/index.js';
 import { generateId as secureId } from '../utils/id.js';
 import { getEncryptionKey, encryptBuffer, decryptBuffer, isEncryptedFile } from '../privacy/encryption.js';
+import type { PrivacyMode } from '../types.js';
 import { initAuditLog } from '../privacy/audit.js';
 import type {
   User,
@@ -523,7 +524,7 @@ export interface Database {
   recordAiConsent(caseId: string, acknowledgedBy: string, scope?: string, notes?: string): { id: string };
   getAiConsent(caseId: string): { id: string; caseId: string; acknowledgedBy: string; scope: string; acknowledgedAt: Date; revokedAt?: Date } | null;
   revokeAiConsent(caseId: string): boolean;
-  gdprDeleteClient(clientId: string): { deletedCases: number; deletedDocuments: number; deletedSessions: number };
+  gdprDeleteClient(clientId: string): { deletedCases: number; deletedDocuments: number; scrubbedSessions: number };
 
   // Raw
   raw(): SqlJsDatabase;
@@ -753,8 +754,8 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
       const id = generateId();
       const ts = now();
       sqlDb.run(
-        'INSERT INTO cases (id, client_id, title, sygnatura, court, law_area, status, description, opposing_party, opposing_counsel, value_of_dispute, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        [id, legalCase.clientId, legalCase.title, legalCase.sygnatura ?? null, legalCase.court ?? null, legalCase.lawArea, legalCase.status, legalCase.description ?? null, legalCase.opposingParty ?? null, legalCase.opposingCounsel ?? null, legalCase.valueOfDispute ?? null, legalCase.notes ?? null, ts, ts]
+        'INSERT INTO cases (id, client_id, title, sygnatura, court, law_area, status, description, opposing_party, opposing_counsel, value_of_dispute, notes, created_at, updated_at, privacy_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [id, legalCase.clientId, legalCase.title, legalCase.sygnatura ?? null, legalCase.court ?? null, legalCase.lawArea, legalCase.status, legalCase.description ?? null, legalCase.opposingParty ?? null, legalCase.opposingCounsel ?? null, legalCase.valueOfDispute ?? null, legalCase.notes ?? null, ts, ts, legalCase.privacyMode ?? null]
       );
       scheduleSave();
       return { id, ...legalCase, createdAt: new Date(ts), updatedAt: new Date(ts) };
@@ -772,6 +773,7 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
         opposingParty: v[8] as string | undefined, opposingCounsel: v[9] as string | undefined,
         valueOfDispute: v[10] as number | undefined, notes: v[11] as string | undefined,
         createdAt: new Date(v[12] as number), updatedAt: new Date(v[13] as number),
+        privacyMode: (v[14] as string | undefined) as PrivacyMode | undefined,
       };
     },
 
@@ -792,6 +794,7 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
         opposingParty: v[8] as string | undefined, opposingCounsel: v[9] as string | undefined,
         valueOfDispute: v[10] as number | undefined, notes: v[11] as string | undefined,
         createdAt: new Date(v[12] as number), updatedAt: new Date(v[13] as number),
+        privacyMode: (v[14] as string | undefined) as PrivacyMode | undefined,
       }));
     },
 
@@ -811,6 +814,7 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
         opposingParty: v[8] as string | undefined, opposingCounsel: v[9] as string | undefined,
         valueOfDispute: v[10] as number | undefined, notes: v[11] as string | undefined,
         createdAt: new Date(v[12] as number), updatedAt: new Date(v[13] as number),
+        privacyMode: (v[14] as string | undefined) as PrivacyMode | undefined,
       }));
     },
 
@@ -822,6 +826,7 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
         court: 'court', lawArea: 'law_area', status: 'status',
         description: 'description', opposingParty: 'opposing_party',
         opposingCounsel: 'opposing_counsel', valueOfDispute: 'value_of_dispute', notes: 'notes',
+        privacyMode: 'privacy_mode',
       };
       const fields: string[] = [];
       const values: SqlParam[] = [];
@@ -1378,14 +1383,21 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
     },
 
     gdprDeleteClient(clientId: string) {
+      // Read client BEFORE any deletes (needed for session scrubbing below)
+      const client = this.getClient(clientId);
       const cases = this.listCases({ clientId });
       let deletedDocuments = 0;
       let deletedSessions = 0;
 
-      // Delete all case-linked data
+      // Delete all case-linked data (including embeddings derived from documents)
       for (const c of cases) {
-        const docs = sqlDb.exec('SELECT COUNT(*) FROM documents WHERE case_id = ?', [c.id]);
-        deletedDocuments += docs.length ? (docs[0].values[0][0] as number) : 0;
+        const docs = sqlDb.exec('SELECT id FROM documents WHERE case_id = ?', [c.id]);
+        if (docs.length) {
+          deletedDocuments += docs[0].values.length;
+          for (const row of docs[0].values) {
+            sqlDb.run("DELETE FROM embeddings WHERE source_type = 'document' AND source_id = ?", [row[0] as string]);
+          }
+        }
         sqlDb.run('DELETE FROM documents WHERE case_id = ?', [c.id]);
         sqlDb.run('DELETE FROM deadlines WHERE case_id = ?', [c.id]);
         sqlDb.run('DELETE FROM time_entries WHERE case_id = ?', [c.id]);
@@ -1397,9 +1409,6 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
 
       // Delete cases
       sqlDb.run('DELETE FROM cases WHERE client_id = ?', [clientId]);
-
-      // Scrub client references from session messages
-      const client = this.getClient(clientId);
       if (client) {
         const allSessions = sqlDb.exec('SELECT key, messages FROM sessions');
         if (allSessions.length) {
@@ -1425,9 +1434,9 @@ function createDatabaseInterface(sqlDb: SqlJsDatabase): Database {
       sqlDb.run('DELETE FROM clients WHERE id = ?', [clientId]);
 
       scheduleSave();
-      logger.info({ clientId, deletedCases: cases.length, deletedDocuments, deletedSessions }, 'RODO: usunięto dane klienta');
+      logger.info({ clientId, deletedCases: cases.length, deletedDocuments, scrubbedSessions: deletedSessions }, 'RODO: usunięto dane klienta');
 
-      return { deletedCases: cases.length, deletedDocuments, deletedSessions };
+      return { deletedCases: cases.length, deletedDocuments, scrubbedSessions: deletedSessions };
     },
 
     raw() { return sqlDb; },

@@ -69,7 +69,7 @@ const ALL_FIRST_NAMES = new Set([...POLISH_FIRST_NAMES_MALE, ...POLISH_FIRST_NAM
  */
 export function matchPolishName(text: string): string | null {
   // Match sequences of 2-3 capitalized Polish words
-  const namePattern = /\b([A-ZŁŚŹŻĆŃ][a-złóśćźżęąń]+)\s+([A-ZŁŚŹŻĆŃ][a-złóśćźżęąń]+)(?:\s+([A-ZŁŚŹŻĆŃ][a-złóśćźżęąń]+))?\b/g;
+  const namePattern = /\b([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)\s+([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)(?:\s+([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+))?\b/g;
 
   for (const m of text.matchAll(namePattern)) {
     const first = m[1];
@@ -96,7 +96,7 @@ export function matchPolishName(text: string): string | null {
  */
 export function findPolishNames(text: string): Array<{ name: string; index: number }> {
   const results: Array<{ name: string; index: number }> = [];
-  const namePattern = /\b([A-ZŁŚŹŻĆŃ][a-złóśćźżęąń]+)\s+([A-ZŁŚŹŻĆŃ][a-złóśćźżęąń]+)(?:\s+([A-ZŁŚŹŻĆŃ][a-złóśćźżęąń]+))?\b/g;
+  const namePattern = /\b([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)\s+([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+)(?:\s+([A-ZŁŚŹŻĆŃĘĄÓ][a-złóśćźżęąń]+))?\b/g;
 
   for (const m of text.matchAll(namePattern)) {
     const first = m[1];

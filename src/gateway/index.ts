@@ -692,7 +692,7 @@ export async function createGateway(config: Config): Promise<AppGateway> {
       const lockMinutes = config.privacy.sessionLockMinutes;
       if (lockMinutes > 0) {
         const lockMs = lockMinutes * 60 * 1000;
-        lockTimer = setInterval(() => {
+        const doLock = () => {
           const locked = db.lockInactiveSessions(lockMs);
           for (const key of locked) {
             const cached = sessions.get(key);
@@ -702,7 +702,9 @@ export async function createGateway(config: Config): Promise<AppGateway> {
               logPrivacyEvent({ action: 'session_lock', sessionKey: key, reason: 'inactivity_lock', privacyMode: config.privacy.mode });
             }
           }
-        }, 5 * 60 * 1000); // check every 5 minutes
+        };
+        doLock(); // run immediately on startup
+        lockTimer = setInterval(doLock, 5 * 60 * 1000); // then every 5 minutes
         logger.info({ lockMinutes }, 'Session auto-lock aktywne');
       }
 

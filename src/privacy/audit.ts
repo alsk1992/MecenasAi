@@ -146,7 +146,8 @@ export function queryAuditLog(filters?: {
       provider: v[10] as string | undefined,
       timestamp: v[11] as number,
     }));
-  } catch {
+  } catch (err) {
+    logger.warn({ err }, 'Błąd zapytania do logu prywatności');
     return [];
   }
 }

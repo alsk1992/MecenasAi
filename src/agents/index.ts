@@ -1937,6 +1937,7 @@ async function executeTool(name: string, input: Record<string, unknown>, db: Dat
         const chkCaseId = resolveCaseId(input, session);
         if (!chkCaseId) return JSON.stringify({ error: 'ID sprawy jest wymagane.' });
         const consent = db.getAiConsent(chkCaseId);
+        logPrivacyEvent({ action: 'consent_record', sessionKey: session.key, userId: session.userId, caseId: chkCaseId, reason: 'consent_check' });
         if (!consent) return JSON.stringify({ hasConsent: false, message: 'Brak zgody na AI dla tej sprawy.' });
         return JSON.stringify({ hasConsent: true, consent });
       }
@@ -1945,6 +1946,7 @@ async function executeTool(name: string, input: Record<string, unknown>, db: Dat
         if (!revCaseId) return JSON.stringify({ error: 'ID sprawy jest wymagane.' });
         const revoked = db.revokeAiConsent(revCaseId);
         if (!revoked) return JSON.stringify({ error: 'Brak aktywnej zgody do cofnięcia.' });
+        logPrivacyEvent({ action: 'consent_record', sessionKey: session.key, userId: session.userId, caseId: revCaseId, reason: 'consent_revoked' });
         return JSON.stringify({ success: true, message: 'Zgoda na AI cofnięta.' });
       }
       case 'gdpr_delete_client': {
@@ -1955,14 +1957,14 @@ async function executeTool(name: string, input: Record<string, unknown>, db: Dat
         if (!client) return JSON.stringify({ error: 'Klient nie znaleziony.' });
         const result = db.gdprDeleteClient(gdprClientId);
         logPrivacyEvent({ action: 'gdpr_delete', sessionKey: session.key, userId: session.userId, reason: `client_deleted`, privacyMode: (session.metadata?.privacyMode as string) ?? 'auto' });
-        return JSON.stringify({ success: true, ...result, message: `Dane klienta trwale usunięte (Art. 17 RODO). Usunięto ${result.deletedCases} spraw, ${result.deletedDocuments} dokumentów, oczyszczono ${result.deletedSessions} sesji.` });
+        return JSON.stringify({ success: true, ...result, message: `Dane klienta trwale usunięte (Art. 17 RODO). Usunięto ${result.deletedCases} spraw, ${result.deletedDocuments} dokumentów, oczyszczono ${result.scrubbedSessions} sesji.` });
       }
       case 'set_case_privacy': {
         const scpCaseId = requireString(input, 'caseId');
         if (!scpCaseId) return JSON.stringify({ error: 'ID sprawy jest wymagane.' });
         const mode = requireString(input, 'privacyMode');
         if (!mode || !['auto', 'strict', 'off'].includes(mode)) return JSON.stringify({ error: 'Tryb musi być: auto, strict lub off.' });
-        const updated = db.updateCase(scpCaseId, { privacyMode: mode } as any);
+        const updated = db.updateCase(scpCaseId, { privacyMode: mode as 'auto' | 'strict' | 'off' });
         if (!updated) return JSON.stringify({ error: 'Sprawa nie znaleziona.' });
         logPrivacyEvent({ action: 'mode_change', sessionKey: session.key, userId: session.userId, caseId: scpCaseId, reason: `case_privacy_set_${mode}`, privacyMode: mode });
         return JSON.stringify({ success: true, message: `Tryb prywatności sprawy ustawiony na: ${mode}.` });
@@ -2199,6 +2201,7 @@ export function createAgent(config: Config, db: Database): Agent {
 
       // If using Anthropic as primary, skip Ollama
       if (config.agent.provider === 'anthropic' && config.agent.anthropicKey) {
+        logPrivacyEvent({ action: 'route_cloud', sessionKey: session.key, userId: session.userId, caseId: activeCaseId, reason: privacy.reason, piiMatchCount: piiResult.matches.length, piiTypes: [...new Set(piiResult.matches.map(m => m.type))], privacyMode: (session.metadata?.privacyMode as string) ?? config.privacy.mode, provider: 'anthropic' });
         return handleWithAnthropic(text, session, config, db, piiDetectedForCloud);
       }
 
@@ -2235,6 +2238,7 @@ export function createAgent(config: Config, db: Database): Agent {
             const retryMsg = retryErr instanceof Error ? retryErr.message : '';
             if (config.agent.anthropicKey) {
               logger.warn({ err: retryMsg }, 'Ollama niedostępna — przełączam na Anthropic');
+              logPrivacyEvent({ action: 'route_cloud', sessionKey: session.key, userId: session.userId, caseId: activeCaseId, reason: 'ollama_fallback', piiMatchCount: piiResult.matches.length, piiTypes: [...new Set(piiResult.matches.map(m => m.type))], privacyMode: (session.metadata?.privacyMode as string) ?? config.privacy.mode, provider: 'anthropic' });
               return handleWithAnthropic(text, session, config, db, piiDetectedForCloud);
             }
             throw retryErr;
@@ -2243,6 +2247,7 @@ export function createAgent(config: Config, db: Database): Agent {
 
         if (isOllamaDown && config.agent.anthropicKey) {
           logger.warn({ err: msg }, 'Ollama niedostępna — przełączam na Anthropic');
+          logPrivacyEvent({ action: 'route_cloud', sessionKey: session.key, userId: session.userId, caseId: activeCaseId, reason: 'ollama_down_fallback', piiMatchCount: piiResult.matches.length, piiTypes: [...new Set(piiResult.matches.map(m => m.type))], privacyMode: (session.metadata?.privacyMode as string) ?? config.privacy.mode, provider: 'anthropic' });
           return handleWithAnthropic(text, session, config, db, piiDetectedForCloud);
         }
         throw err;
@@ -2264,6 +2269,15 @@ async function handleWithAnthropic(
 ): Promise<string | null> {
   // --- Network isolation: strict mode blocks ALL cloud calls ---
   const effectivePrivacyMode = (session.metadata?.privacyMode as string) ?? config.privacy.mode;
+  // Also check active case's privacy mode as defense-in-depth
+  const activeCaseId = session.metadata?.activeCaseId as string | undefined;
+  if (activeCaseId) {
+    const activeCase = db.getCase(activeCaseId);
+    if (activeCase?.privacyMode === 'strict') {
+      logPrivacyEvent({ action: 'route_refuse', sessionKey: session.key, userId: session.userId, caseId: activeCaseId, reason: 'case_strict_mode_cloud_blocked', privacyMode: 'strict', provider: 'anthropic' });
+      return '⚠️ **Ochrona prywatności**: Sprawa ma tryb ścisły — wszystkie zapytania muszą być przetwarzane lokalnie. Uruchom Ollama (`ollama serve`).';
+    }
+  }
   if (effectivePrivacyMode === 'strict') {
     logPrivacyEvent({ action: 'route_refuse', sessionKey: session.key, userId: session.userId, reason: 'strict_mode_cloud_blocked', privacyMode: 'strict', provider: 'anthropic' });
     return '⚠️ **Ochrona prywatności**: Tryb ścisły aktywny — wszystkie zapytania muszą być przetwarzane lokalnie. Zewnętrzne serwery AI są zablokowane. Uruchom Ollama (`ollama serve`).';

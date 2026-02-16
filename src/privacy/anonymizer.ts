@@ -118,10 +118,9 @@ export class Anonymizer {
     const normalized = this.normalizeValue(type, value);
     const existing = this.forward.get(value) ?? this.forward.get(normalized);
     if (existing) {
-      // Also register the original form for this placeholder
+      // Also register the original form for forward lookup (but keep first seen form in reverse)
       if (!this.forward.has(value)) {
         this.forward.set(value, existing);
-        this.reverse.set(existing, value);
       }
       return existing;
     }

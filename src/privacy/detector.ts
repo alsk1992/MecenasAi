@@ -325,6 +325,18 @@ export function containsSensitiveData(text: string): boolean {
   NAME_AFTER_KEYWORD_RE.lastIndex = 0;
   if (ID_CARD_RE.test(text)) { ID_CARD_RE.lastIndex = 0; return true; }
   ID_CARD_RE.lastIndex = 0;
+  if (PASSPORT_RE.test(text)) { PASSPORT_RE.lastIndex = 0; return true; }
+  PASSPORT_RE.lastIndex = 0;
+  if (REGON_RE.test(text)) { REGON_RE.lastIndex = 0; return true; }
+  REGON_RE.lastIndex = 0;
+  if (POSTAL_CODE_RE.test(text)) { POSTAL_CODE_RE.lastIndex = 0; return true; }
+  POSTAL_CODE_RE.lastIndex = 0;
+  if (CASE_SIGNATURE_RE.test(text)) { CASE_SIGNATURE_RE.lastIndex = 0; return true; }
+  CASE_SIGNATURE_RE.lastIndex = 0;
+  if (ADDRESS_RE.test(text)) { ADDRESS_RE.lastIndex = 0; return true; }
+  ADDRESS_RE.lastIndex = 0;
+  if (COMPANY_NAME_RE.test(text)) { COMPANY_NAME_RE.lastIndex = 0; return true; }
+  COMPANY_NAME_RE.lastIndex = 0;
 
   // Dictionary-based Polish name check
   if (containsPolishName(text)) return true;
